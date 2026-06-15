@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Teacher Performance Scorecard
 
 Vite + React + Tailwind frontend with an Express + SQLite API for institute CRM workflows and teacher performance scorecards.
@@ -85,3 +86,6 @@ The backend supports two database modes:
   Use `DATABASE_SSL=true` for hosted Postgres providers that require SSL.
 
 SQLite is fine for local/single-user use. Use Postgres before deploying this as a shared multi-user system.
+=======
+# coaching_institue_crm_erp
+>>>>>>> 05bc57528d87603b29599b3164a87e7fd7192db9
