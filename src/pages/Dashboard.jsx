@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Bell,
   CalendarCheck,
+  CheckCircle2,
   ClipboardCheck,
   CreditCard,
   IndianRupee,
@@ -13,12 +14,14 @@ import {
   Users,
 } from 'lucide-react';
 import {
+  completeFollowUp,
   fetchAdmissions,
   fetchAttendanceDashboard,
   fetchAttendanceReports,
   fetchExpenseReports,
   fetchFeePlans,
   fetchFeesSummary,
+  fetchFollowUps,
   fetchStudents,
   fetchTeacherReviews,
   fetchTeachers,
@@ -85,6 +88,7 @@ export default function Dashboard() {
   const [reviews, setReviews] = useState([]);
   const [fees, setFees] = useState({ totals: {} });
   const [feePlans, setFeePlans] = useState([]);
+  const [followUps, setFollowUps] = useState([]);
   const [attendance, setAttendance] = useState(null);
   const [attendanceReports, setAttendanceReports] = useState(null);
   const [expenses, setExpenses] = useState(null);
@@ -103,6 +107,7 @@ export default function Dashboard() {
         reviewRows,
         feeRows,
         planRows,
+        followUpRows,
         attendanceRows,
         attendanceReportRows,
         expenseRows,
@@ -113,6 +118,7 @@ export default function Dashboard() {
         fetchTeacherReviews(),
         fetchFeesSummary(),
         fetchFeePlans(),
+        fetchFollowUps({ status: 'Open' }).catch(() => []),
         fetchAttendanceDashboard(today()),
         fetchAttendanceReports(nextMonth),
         fetchExpenseReports(nextMonth),
@@ -123,6 +129,7 @@ export default function Dashboard() {
       setReviews(reviewRows);
       setFees(feeRows);
       setFeePlans(planRows);
+      setFollowUps(followUpRows);
       setAttendance(attendanceRows);
       setAttendanceReports(attendanceReportRows);
       setExpenses(expenseRows);
@@ -152,6 +159,9 @@ export default function Dashboard() {
     const repeatedAbsentees = (attendanceReports?.irregularStudents || []).filter((row) => row.absent >= 3);
     const teacherPending = (attendanceReports?.teacherCompletion || []).filter((row) => Number(row.pending || 0) > 0);
     const billPending = expenses?.billPending || [];
+    const todayFollowUps = followUps
+      .filter((task) => task.status === 'Overdue' || !task.dueDate || task.dueDate <= today())
+      .sort((a, b) => String(a.dueDate || '').localeCompare(String(b.dueDate || '')));
 
     return {
       openAdmissions,
@@ -161,13 +171,20 @@ export default function Dashboard() {
       repeatedAbsentees,
       teacherPending,
       billPending,
+      todayFollowUps,
+      overdueFollowUps: followUps.filter((task) => task.status === 'Overdue'),
       cashPosition: Number(fees.totals?.collected || 0) - Number(expenses?.totals?.totalExpenses || 0),
     };
-  }, [admissions, attendanceReports, expenses, feePlans, fees, reviews]);
+  }, [admissions, attendanceReports, expenses, feePlans, fees, followUps, reviews]);
 
   async function handleMonthChange(value) {
     setMonth(value);
     await loadDashboard(value);
+  }
+
+  async function handleCompleteFollowUp(taskId) {
+    await completeFollowUp(taskId);
+    await loadDashboard(month);
   }
 
   if (loading) {
@@ -222,7 +239,7 @@ export default function Dashboard() {
         <Metric icon={AlertTriangle} label="Fees Pending" value={money(fees.totals?.pending)} tone="risk" />
         <Metric icon={AlertTriangle} label="Overdue Fees" value={money(fees.totals?.overdue)} tone="risk" />
         <Metric icon={Receipt} label="Monthly Expenses" value={money(expenses?.totals?.totalExpenses)} />
-        <Metric icon={IndianRupee} label="Net Cash Position" value={money(metrics.cashPosition)} tone={metrics.cashPosition < 0 ? 'risk' : 'good'} />
+        <Metric icon={CheckCircle2} label="Due Follow-ups" value={metrics.todayFollowUps.length} tone={metrics.overdueFollowUps.length ? 'risk' : 'neutral'} />
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[1fr_360px]">
@@ -255,6 +272,22 @@ export default function Dashboard() {
               <QuickAction to="/teacher-performance" label="Create teacher review" />
             </CardContent>
           </Card>
+
+          <SideList title="Today's Follow-ups" rows={metrics.todayFollowUps} empty="No follow-ups due today." render={(task) => (
+            <>
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <strong>{task.studentName || 'Student'}</strong>
+                  <p className="mt-1 text-muted-foreground">{task.taskType} - due {task.dueDate || '-'}</p>
+                </div>
+                <Badge variant={task.status === 'Overdue' ? 'destructive' : 'secondary'}>{task.status}</Badge>
+              </div>
+              {task.notes ? <p className="mt-2 text-muted-foreground">{task.notes}</p> : null}
+              <Button size="sm" variant="outline" className="mt-3" onClick={() => handleCompleteFollowUp(task.id)}>
+                Mark Done
+              </Button>
+            </>
+          )} />
 
           <SideList title="Teacher Performance Risk" rows={metrics.weakReviews} empty="No weak latest teacher reviews." render={(review) => (
             <>

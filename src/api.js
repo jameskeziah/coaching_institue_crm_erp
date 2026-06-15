@@ -84,6 +84,10 @@ export function fetchConfig() {
   return request('/config');
 }
 
+export function fetchCurrentTenant() {
+  return request('/tenant/current');
+}
+
 export function changePassword(currentPassword, newPassword) {
   return request('/auth/change-password', {
     method: 'POST',
@@ -147,6 +151,33 @@ export function updateStudentHistory(id, payload) {
 
 export function deleteStudentHistory(id) {
   return request(`/student-history/${id}`, { method: 'DELETE' });
+}
+
+export function fetchFollowUps(params = {}) {
+  const query = new URLSearchParams(
+    Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== '')
+  ).toString();
+  return request(`/follow-ups${query ? `?${query}` : ''}`);
+}
+
+export function createFollowUp(payload) {
+  return request('/follow-ups', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function updateFollowUp(id, payload) {
+  return request(`/follow-ups/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
+}
+
+export function completeFollowUp(id, payload = {}) {
+  return request(`/follow-ups/${id}/complete`, { method: 'PATCH', body: JSON.stringify(payload) });
+}
+
+export function deleteFollowUp(id) {
+  return request(`/follow-ups/${id}`, { method: 'DELETE' });
+}
+
+export function runFollowUpEscalation(payload = {}) {
+  return request('/automation/follow-ups', { method: 'POST', body: JSON.stringify(payload) });
 }
 
 export function fetchFeesSummary() {
@@ -437,6 +468,22 @@ export function markFeeReminderSent(payload) {
 
 export function runFeeReminderAutomation(payload = {}) {
   return request('/automation/fees', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function fetchWhatsAppStatus() {
+  return request('/whatsapp/status');
+}
+
+export function sendWhatsAppTest(payload) {
+  return request('/whatsapp/test', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function fetchMessageTemplates() {
+  return request('/message-templates');
+}
+
+export function updateMessageTemplate(id, payload) {
+  return request(`/message-templates/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
 }
 
 export function fetchFeeAuditLogs() {

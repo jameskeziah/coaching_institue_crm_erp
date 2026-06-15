@@ -6,6 +6,7 @@ import {
   CalendarCheck,
   ChartNoAxesColumnIncreasing,
   ClipboardCheck,
+  ListChecks,
   Cpu,
   GraduationCap,
   IndianRupee,
@@ -33,6 +34,7 @@ const navItems = [
   { title: 'Students', href: '/students', icon: Users, module: 'students' },
   { title: 'Admissions', href: '/admissions', icon: UserPlus, module: 'admissions' },
   { title: 'Fees', href: '/fees', icon: IndianRupee, module: 'fees' },
+  { title: 'Follow-ups', href: '/follow-ups', icon: ListChecks, module: 'followUps' },
   { title: 'Expenses', href: '/expenses', icon: Receipt, module: 'expenses' },
   { title: 'Reports', href: '/reports', icon: BarChart3, module: 'reports' },
   { title: 'Academic', href: '/academic', icon: BookOpen, module: 'academic' },
@@ -129,11 +131,11 @@ export function CRMLayout() {
 
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <p className="truncate text-sm font-medium">Admin Dashboard</p>
-                <Badge variant="secondary" className="hidden sm:inline-flex">Live CRM</Badge>
+                <p className="truncate text-sm font-medium">{user?.tenantName || 'Admin Dashboard'}</p>
+                <Badge variant="secondary" className="hidden sm:inline-flex">{user?.subscriptionPlan || 'Live CRM'}</Badge>
               </div>
               <p className="hidden truncate text-xs text-muted-foreground sm:block">
-                Manage students, fees, academics and staff performance
+                {user?.subscriptionStatus ? `Subscription ${user.subscriptionStatus}` : 'Manage students, fees, academics and staff performance'}
               </p>
             </div>
           </div>

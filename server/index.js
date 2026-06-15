@@ -44,12 +44,14 @@ app.get('/api', (req, res) => {
       '/api/auth/login',
       '/api/auth/register',
       '/api/config',
+      '/api/tenant/current',
       '/api/users',
       '/api/teachers',
       '/api/teacher-work-controls',
       '/api/teacher-management-actions',
       '/api/teacher-reviews',
       '/api/students',
+      '/api/follow-ups',
       '/api/fees/summary',
       '/api/fee-structures',
       '/api/fee-plans',
@@ -67,6 +69,10 @@ app.get('/api', (req, res) => {
       '/api/staff-attendance/today',
       '/api/automation/attendance',
       '/api/automation/fees',
+      '/api/automation/follow-ups',
+      '/api/whatsapp/status',
+      '/api/whatsapp/test',
+      '/api/message-templates',
       '/api/parent-portal/lookup',
       '/api/ai-lab/dashboard',
       '/api/ai-lab/courses',
@@ -152,6 +158,7 @@ const adminRoles = ['admin', 'director', 'owner'];
 const feeRoles = ['admin', 'director', 'owner', 'accountant', 'counsellor'];
 const paymentRoles = ['admin', 'director', 'owner', 'accountant'];
 const expenseRoles = ['admin', 'director', 'owner', 'accountant'];
+const followUpRoles = ['admin', 'director', 'owner', 'accountant', 'counsellor', 'teacher'];
 
 function requireFields(body, fields) {
   const missing = fields.filter((field) => {
@@ -165,7 +172,19 @@ function requireFields(body, fields) {
 }
 
 function publicUser(user) {
-  return { id: user.id, username: user.username, role: user.role };
+  return {
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    tenant_id: user.tenant_id || user.tenantId || null,
+    tenantName: user.tenantName || null,
+    subscriptionPlan: user.subscriptionPlan || null,
+    subscriptionStatus: user.subscriptionStatus || null,
+  };
+}
+
+function currentTenantId(req) {
+  return req.user?.tenant_id || req.user?.tenantId || null;
 }
 
 // Auth: Register
@@ -176,8 +195,9 @@ app.post('/api/auth/register', async (req, res) => {
   if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
   const existing = await get(`SELECT * FROM users WHERE username = ?`, [username]);
   if (existing) return res.status(400).json({ error: 'User already exists' });
+  const tenant = await get(`SELECT * FROM tenants WHERE slug = ?`, ['miraku']);
   const hashed = await bcrypt.hash(password, 10);
-  await run(`INSERT INTO users (username, password, role) VALUES (?, ?, ?)`, [username, hashed, 'user']);
+  await run(`INSERT INTO users (username, password, role, tenant_id) VALUES (?, ?, ?, ?)`, [username, hashed, 'user', tenant?.id || null]);
   res.json({ ok: true });
 });
 
@@ -185,12 +205,27 @@ app.post('/api/auth/register', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Missing credentials' });
-  const user = await get(`SELECT * FROM users WHERE username = ?`, [username]);
+  const user = await get(
+    `SELECT users.*, tenants.name AS tenantName, tenants.subscriptionPlan, tenants.subscriptionStatus, tenants.status AS tenantStatus
+     FROM users
+     LEFT JOIN tenants ON tenants.id = users.tenant_id
+     WHERE users.username = ?`,
+    [username]
+  );
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+  if (user.tenantStatus && user.tenantStatus !== 'Active') return res.status(403).json({ error: 'Tenant is inactive' });
   const match = await bcrypt.compare(password, user.password);
   if (!match) return res.status(401).json({ error: 'Invalid credentials' });
-  const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, SECRET, { expiresIn: '8h' });
-  res.json({ token, user: { id: user.id, username: user.username, role: user.role } });
+  const token = jwt.sign({ id: user.id, username: user.username, role: user.role, tenant_id: user.tenant_id || user.tenantId || null }, SECRET, { expiresIn: '8h' });
+  res.json({ token, user: publicUser(user) });
+});
+
+app.get('/api/tenant/current', authMiddleware, async (req, res) => {
+  const tenantId = req.user.tenant_id || req.user.tenantId;
+  if (!tenantId) return res.status(404).json({ error: 'Tenant not found' });
+  const tenant = await get(`SELECT id, name, slug, subscriptionPlan, subscriptionStatus, billingEmail, status, createdAt, updatedAt FROM tenants WHERE id = ?`, [tenantId]);
+  if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+  res.json(tenant);
 });
 
 app.post('/api/auth/change-password', authMiddleware, async (req, res) => {
@@ -209,8 +244,15 @@ app.post('/api/auth/change-password', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/users', authMiddleware, requireRole('admin'), async (req, res) => {
-  const users = await all(`SELECT id, username, role FROM users ORDER BY username`);
-  res.json(users);
+  const users = await all(
+    `SELECT users.id, users.username, users.role, users.tenant_id, tenants.name AS tenantName, tenants.subscriptionPlan, tenants.subscriptionStatus
+     FROM users
+     LEFT JOIN tenants ON tenants.id = users.tenant_id
+     WHERE users.tenant_id = ?
+     ORDER BY users.username`,
+    [req.user.tenant_id || req.user.tenantId]
+  );
+  res.json(users.map(publicUser));
 });
 
 app.post('/api/users', authMiddleware, requireRole('admin'), async (req, res) => {
@@ -223,8 +265,15 @@ app.post('/api/users', authMiddleware, requireRole('admin'), async (req, res) =>
   if (existing) return res.status(400).json({ error: 'User already exists' });
 
   const hashed = await bcrypt.hash(password, 10);
-  const result = await run(`INSERT INTO users (username, password, role) VALUES (?, ?, ?)`, [username, hashed, role]);
-  const user = await get(`SELECT id, username, role FROM users WHERE id = ?`, [result.lastID]);
+  const tenantId = req.user.tenant_id || req.user.tenantId;
+  const result = await run(`INSERT INTO users (username, password, role, tenant_id) VALUES (?, ?, ?, ?)`, [username, hashed, role, tenantId || null]);
+  const user = await get(
+    `SELECT users.id, users.username, users.role, users.tenant_id, tenants.name AS tenantName, tenants.subscriptionPlan, tenants.subscriptionStatus
+     FROM users
+     LEFT JOIN tenants ON tenants.id = users.tenant_id
+     WHERE users.id = ?`,
+    [result.lastID]
+  );
   res.json(publicUser(user));
 });
 
@@ -232,15 +281,24 @@ app.put('/api/users/:id/role', authMiddleware, requireRole('admin'), async (req,
   const { id } = req.params;
   const { role } = req.body;
   if (!userRoles.includes(role)) return res.status(400).json({ error: 'Invalid role' });
-  await run(`UPDATE users SET role = ? WHERE id = ?`, [role, id]);
-  const user = await get(`SELECT id, username, role FROM users WHERE id = ?`, [id]);
+  const tenantId = req.user.tenant_id || req.user.tenantId;
+  const existing = await get(`SELECT * FROM users WHERE id = ? AND tenant_id = ?`, [id, tenantId]);
+  if (!existing) return res.status(404).json({ error: 'User not found' });
+  await run(`UPDATE users SET role = ? WHERE id = ? AND tenant_id = ?`, [role, id, tenantId]);
+  const user = await get(
+    `SELECT users.id, users.username, users.role, users.tenant_id, tenants.name AS tenantName, tenants.subscriptionPlan, tenants.subscriptionStatus
+     FROM users
+     LEFT JOIN tenants ON tenants.id = users.tenant_id
+     WHERE users.id = ? AND users.tenant_id = ?`,
+    [id, tenantId]
+  );
   if (!user) return res.status(404).json({ error: 'User not found' });
   res.json(publicUser(user));
 });
 
 // Teachers CRUD
 app.get('/api/teachers', authMiddleware, async (req, res) => {
-  const rows = await all(`SELECT * FROM teachers ORDER BY id DESC`);
+  const rows = await all(`SELECT * FROM teachers WHERE tenant_id = ? ORDER BY id DESC`, [currentTenantId(req)]);
   res.json(rows.map((r) => ({ ...r, data: r.data ? JSON.parse(r.data) : null })));
 });
 
@@ -249,7 +307,7 @@ app.post('/api/teachers', authMiddleware, async (req, res) => {
   const validationError = requireFields(req.body, ['name']);
   if (validationError) return res.status(400).json({ error: validationError });
   const now = new Date().toISOString();
-  const result = await run(`INSERT INTO teachers (name, subject, month, data, updatedAt) VALUES (?, ?, ?, ?, ?)`, [name, subject, month, JSON.stringify(data || {}), now]);
+  const result = await run(`INSERT INTO teachers (tenant_id, name, subject, month, data, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`, [currentTenantId(req), name, subject, month, JSON.stringify(data || {}), now]);
   res.json({ id: result.lastID });
 });
 
@@ -258,21 +316,23 @@ app.put('/api/teachers/:id', authMiddleware, async (req, res) => {
   const { name, subject, month, data } = req.body;
   const validationError = requireFields(req.body, ['name']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const existing = await get(`SELECT * FROM teachers WHERE id = ?`, [id]);
+  const existing = await get(`SELECT * FROM teachers WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'Teacher not found' });
   const now = new Date().toISOString();
-  await run(`UPDATE teachers SET name = ?, subject = ?, month = ?, data = ?, updatedAt = ? WHERE id = ?`, [name, subject, month, JSON.stringify(data || {}), now, id]);
+  await run(`UPDATE teachers SET name = ?, subject = ?, month = ?, data = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`, [name, subject, month, JSON.stringify(data || {}), now, id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 app.delete('/api/teachers/:id', authMiddleware, requireRole('admin'), async (req, res) => {
   const { id } = req.params;
+  const existing = await get(`SELECT * FROM teachers WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Teacher not found' });
   await run(`DELETE FROM staff_attendance_records WHERE staff_id = ?`, [id]);
   await run(`DELETE FROM leave_requests WHERE staff_id = ?`, [id]);
   await run(`DELETE FROM teacher_work_controls WHERE teacher_id = ?`, [id]);
   await run(`DELETE FROM teacher_management_actions WHERE teacher_id = ?`, [id]);
   await run(`DELETE FROM teacher_reviews WHERE teacher_id = ?`, [id]);
-  await run(`DELETE FROM teachers WHERE id = ?`, [id]);
+  await run(`DELETE FROM teachers WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -459,7 +519,7 @@ app.delete('/api/teacher-reviews/:id', authMiddleware, requireRole('admin'), asy
 
 // Students CRUD
 app.get('/api/students', authMiddleware, async (req, res) => {
-  const rows = await all(`SELECT * FROM students ORDER BY id DESC`);
+  const rows = await all(`SELECT * FROM students WHERE tenant_id = ? ORDER BY id DESC`, [currentTenantId(req)]);
   res.json(rows.map((r) => ({ ...r, data: r.data ? JSON.parse(r.data) : null })));
 });
 
@@ -467,7 +527,7 @@ app.post('/api/students', authMiddleware, async (req, res) => {
   const { name, grade, batch, attendance, data } = req.body;
   const validationError = requireFields(req.body, ['name']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const result = await run(`INSERT INTO students (name, grade, batch, attendance, data) VALUES (?, ?, ?, ?, ?)`, [name, grade, batch, attendance, JSON.stringify(data || {})]);
+  const result = await run(`INSERT INTO students (tenant_id, name, grade, batch, attendance, data) VALUES (?, ?, ?, ?, ?, ?)`, [currentTenantId(req), name, grade, batch, attendance, JSON.stringify(data || {})]);
   res.json({ id: result.lastID });
 });
 
@@ -476,14 +536,16 @@ app.put('/api/students/:id', authMiddleware, async (req, res) => {
   const { name, grade, batch, attendance, data } = req.body;
   const validationError = requireFields(req.body, ['name']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const existing = await get(`SELECT * FROM students WHERE id = ?`, [id]);
+  const existing = await get(`SELECT * FROM students WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'Student not found' });
-  await run(`UPDATE students SET name = ?, grade = ?, batch = ?, attendance = ?, data = ? WHERE id = ?`, [name, grade, batch, attendance, JSON.stringify(data || {}), id]);
+  await run(`UPDATE students SET name = ?, grade = ?, batch = ?, attendance = ?, data = ? WHERE id = ? AND tenant_id = ?`, [name, grade, batch, attendance, JSON.stringify(data || {}), id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 app.delete('/api/students/:id', authMiddleware, requireRole('admin'), async (req, res) => {
   const { id } = req.params;
+  const existing = await get(`SELECT * FROM students WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Student not found' });
   const plans = await all(`SELECT id FROM fee_plans WHERE student_id = ?`, [id]);
   for (const plan of plans) {
     await run(`DELETE FROM fee_components WHERE fee_plan_id = ?`, [plan.id]);
@@ -499,6 +561,7 @@ app.delete('/api/students/:id', authMiddleware, requireRole('admin'), async (req
   await run(`DELETE FROM parent_call_logs WHERE student_id = ?`, [id]);
   await run(`DELETE FROM attendance_correction_requests WHERE student_id = ?`, [id]);
   await run(`DELETE FROM attendance_records WHERE student_id = ?`, [id]);
+  await run(`DELETE FROM follow_up_tasks WHERE student_id = ?`, [id]);
   await run(`DELETE FROM student_history WHERE student_id = ?`, [id]);
   await run(`DELETE FROM students WHERE id = ?`, [id]);
   res.json({ ok: true });
@@ -506,6 +569,8 @@ app.delete('/api/students/:id', authMiddleware, requireRole('admin'), async (req
 
 app.get('/api/students/:id/history', authMiddleware, async (req, res) => {
   const { id } = req.params;
+  const student = await get(`SELECT id FROM students WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
+  if (!student) return res.status(404).json({ error: 'Student not found' });
   const rows = await all(`SELECT * FROM student_history WHERE student_id = ? ORDER BY eventDate DESC, id DESC`, [id]);
   res.json(rows);
 });
@@ -515,7 +580,7 @@ app.post('/api/students/:id/history', authMiddleware, async (req, res) => {
   const { type, title, detail, eventDate } = req.body;
   const validationError = requireFields(req.body, ['type', 'title']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const student = await get(`SELECT * FROM students WHERE id = ?`, [id]);
+  const student = await get(`SELECT * FROM students WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
   if (!student) return res.status(404).json({ error: 'Student not found' });
   const now = new Date().toISOString();
   const result = await run(
@@ -542,6 +607,228 @@ app.delete('/api/student-history/:id', authMiddleware, requireRole('admin'), asy
   const { id } = req.params;
   await run(`DELETE FROM student_history WHERE id = ?`, [id]);
   res.json({ ok: true });
+});
+
+function normalizeFollowUpTask(row) {
+  if (!row) return row;
+  const today = new Date().toISOString().slice(0, 10);
+  const savedStatus = row.status || 'Open';
+  const computedStatus = savedStatus === 'Open' && row.dueDate && row.dueDate < today ? 'Overdue' : savedStatus;
+  return {
+    ...row,
+    priority: row.priority || 'Medium',
+    status: computedStatus,
+  };
+}
+
+function followUpOrderSql() {
+  return `
+    CASE COALESCE(follow_up_tasks.priority, 'Medium')
+      WHEN 'Urgent' THEN 1
+      WHEN 'High' THEN 2
+      WHEN 'Medium' THEN 3
+      ELSE 4
+    END ASC,
+    follow_up_tasks.dueDate ASC,
+    follow_up_tasks.id DESC`;
+}
+
+async function getFollowUpTask(id) {
+  const row = await get(
+    `SELECT follow_up_tasks.*, COALESCE(students.name, follow_up_tasks.studentName) AS studentName
+     FROM follow_up_tasks
+     LEFT JOIN students ON students.id = follow_up_tasks.student_id
+     WHERE follow_up_tasks.id = ?`,
+    [id]
+  );
+  return normalizeFollowUpTask(row);
+}
+
+app.get('/api/follow-ups', authMiddleware, requireAnyRole(followUpRoles), async (req, res) => {
+  const today = new Date().toISOString().slice(0, 10);
+  const where = [];
+  const params = [];
+  const { student_id, status, date, from, to, assignedTo } = req.query;
+
+  if (student_id) {
+    where.push('follow_up_tasks.student_id = ?');
+    params.push(student_id);
+  }
+  if (assignedTo) {
+    where.push('LOWER(COALESCE(follow_up_tasks.assignedTo, ?)) = LOWER(?)');
+    params.push('', assignedTo);
+  }
+  if (date) {
+    where.push('follow_up_tasks.dueDate = ?');
+    params.push(date);
+  }
+  if (from) {
+    where.push('follow_up_tasks.dueDate >= ?');
+    params.push(from);
+  }
+  if (to) {
+    where.push('follow_up_tasks.dueDate <= ?');
+    params.push(to);
+  }
+  if (status === 'Open') {
+    where.push("COALESCE(follow_up_tasks.status, 'Open') = 'Open'");
+  } else if (status === 'Overdue') {
+    where.push("COALESCE(follow_up_tasks.status, 'Open') = 'Open' AND follow_up_tasks.dueDate < ?");
+    params.push(today);
+  } else if (status) {
+    where.push('follow_up_tasks.status = ?');
+    params.push(status);
+  }
+
+  const rows = await all(
+    `SELECT follow_up_tasks.*, COALESCE(students.name, follow_up_tasks.studentName) AS studentName
+     FROM follow_up_tasks
+     LEFT JOIN students ON students.id = follow_up_tasks.student_id
+     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+     ORDER BY ${followUpOrderSql()}`,
+    params
+  );
+  res.json(rows.map(normalizeFollowUpTask));
+});
+
+app.post('/api/follow-ups', authMiddleware, requireAnyRole(followUpRoles), async (req, res) => {
+  const {
+    student_id,
+    taskType,
+    dueDate,
+    priority = 'Medium',
+    assignedTo,
+    status = 'Open',
+    notes,
+    linkedType,
+    linkedId,
+  } = req.body;
+  const validationError = requireFields(req.body, ['student_id', 'taskType', 'dueDate']);
+  if (validationError) return res.status(400).json({ error: validationError });
+  const student = await get(`SELECT * FROM students WHERE id = ?`, [student_id]);
+  if (!student) return res.status(404).json({ error: 'Student not found' });
+  const now = new Date().toISOString();
+  const result = await run(
+    `INSERT INTO follow_up_tasks (student_id, studentName, taskType, dueDate, priority, assignedTo, status, notes, linkedType, linkedId, createdBy, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [student_id, student.name, taskType, dueDate, priority, assignedTo || req.user.username, status, notes, linkedType, linkedId || null, req.user.username, now, now]
+  );
+  res.json(await getFollowUpTask(result.lastID));
+});
+
+app.put('/api/follow-ups/:id', authMiddleware, requireAnyRole(followUpRoles), async (req, res) => {
+  const { taskType, dueDate, priority = 'Medium', assignedTo, status = 'Open', notes, linkedType, linkedId } = req.body;
+  const validationError = requireFields(req.body, ['taskType', 'dueDate']);
+  if (validationError) return res.status(400).json({ error: validationError });
+  const existing = await get(`SELECT * FROM follow_up_tasks WHERE id = ?`, [req.params.id]);
+  if (!existing) return res.status(404).json({ error: 'Follow-up task not found' });
+  const now = new Date().toISOString();
+  await run(
+    `UPDATE follow_up_tasks
+     SET taskType = ?, dueDate = ?, priority = ?, assignedTo = ?, status = ?, notes = ?, linkedType = ?, linkedId = ?, updatedAt = ?
+     WHERE id = ?`,
+    [taskType, dueDate, priority, assignedTo, status, notes, linkedType, linkedId || null, now, req.params.id]
+  );
+  res.json(await getFollowUpTask(req.params.id));
+});
+
+app.patch('/api/follow-ups/:id/complete', authMiddleware, requireAnyRole(followUpRoles), async (req, res) => {
+  const existing = await get(`SELECT * FROM follow_up_tasks WHERE id = ?`, [req.params.id]);
+  if (!existing) return res.status(404).json({ error: 'Follow-up task not found' });
+  const now = new Date().toISOString();
+  const outcome = String(req.body.outcome || req.body.completionOutcome || '').trim();
+  const completedBy = req.body.completedBy || req.user.username;
+  await run(
+    `UPDATE follow_up_tasks SET status = ?, completionOutcome = ?, completedAt = ?, completedBy = ?, updatedAt = ? WHERE id = ?`,
+    ['Done', outcome || null, now, completedBy, now, req.params.id]
+  );
+  await run(
+    `INSERT INTO student_history (student_id, type, title, detail, eventDate, createdAt) VALUES (?, ?, ?, ?, ?, ?)`,
+    [
+      existing.student_id,
+      'Follow-up',
+      `${existing.taskType || 'Follow-up'} completed`,
+      [
+        existing.notes ? `Task note: ${existing.notes}` : '',
+        outcome ? `Outcome: ${outcome}` : 'Outcome: Marked done',
+        `Completed by: ${completedBy}`,
+      ].filter(Boolean).join('\n'),
+      now.slice(0, 10),
+      now,
+    ]
+  );
+  res.json(await getFollowUpTask(req.params.id));
+});
+
+app.delete('/api/follow-ups/:id', authMiddleware, requireAnyRole(adminRoles), async (req, res) => {
+  await run(`DELETE FROM follow_up_tasks WHERE id = ?`, [req.params.id]);
+  res.json({ ok: true });
+});
+
+app.post('/api/automation/follow-ups', authMiddleware, requireAnyRole(adminRoles), async (req, res) => {
+  const { minAgeDays = 3, assignedTo, dryRun = false } = req.body || {};
+  const threshold = Math.max(1, Number(minAgeDays || 3));
+  const today = new Date().toISOString().slice(0, 10);
+  const now = new Date().toISOString();
+  const cutoff = new Date(today);
+  cutoff.setDate(cutoff.getDate() - threshold);
+  const cutoffDate = cutoff.toISOString().slice(0, 10);
+  const params = [cutoffDate];
+  const assignedFilter = assignedTo ? 'AND LOWER(COALESCE(follow_up_tasks.assignedTo, ?)) = LOWER(?)' : '';
+  if (assignedTo) params.push('', assignedTo);
+
+  const rows = await all(
+    `SELECT follow_up_tasks.*, COALESCE(students.name, follow_up_tasks.studentName) AS studentName
+     FROM follow_up_tasks
+     LEFT JOIN students ON students.id = follow_up_tasks.student_id
+     WHERE COALESCE(follow_up_tasks.status, 'Open') = 'Open'
+       AND follow_up_tasks.dueDate <= ?
+       ${assignedFilter}
+     ORDER BY ${followUpOrderSql()}`,
+    params
+  );
+  const escalations = rows.map((row) => ({
+    ...normalizeFollowUpTask(row),
+    ageDays: Math.max(0, Math.floor((new Date(today).getTime() - new Date(row.dueDate).getTime()) / 86400000)),
+  }));
+  const alreadyEscalated = escalations.filter((task) => String(task.lastEscalatedAt || '').slice(0, 10) === today);
+  const pendingEscalations = escalations.filter((task) => String(task.lastEscalatedAt || '').slice(0, 10) !== today);
+
+  if (!dryRun) {
+    for (const task of pendingEscalations) {
+      await run(
+        `INSERT INTO student_history (student_id, type, title, detail, eventDate, createdAt) VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          task.student_id || task.studentId,
+          'Follow-up Escalation',
+          `${task.taskType || 'Follow-up'} overdue escalation`,
+          [
+            `Due date: ${task.dueDate || '-'}`,
+            `Age: ${task.ageDays} day(s) overdue`,
+            `Priority: ${task.priority || 'Medium'}`,
+            `Assigned to: ${task.assignedTo || 'Unassigned'}`,
+            task.notes ? `Task note: ${task.notes}` : '',
+            `Escalated by: ${req.user.username}`,
+          ].filter(Boolean).join('\n'),
+          today,
+          now,
+        ]
+      );
+      await run(
+        `UPDATE follow_up_tasks SET lastEscalatedAt = ?, escalationCount = COALESCE(escalationCount, 0) + 1, updatedAt = ? WHERE id = ?`,
+        [now, now, task.id]
+      );
+    }
+  }
+
+  res.json({
+    dryRun: Boolean(dryRun),
+    minAgeDays: threshold,
+    escalated: dryRun ? 0 : pendingEscalations.length,
+    skipped: alreadyEscalated.length,
+    candidates: pendingEscalations,
+    alreadyEscalated,
+  });
 });
 
 function normalizeFeePlan(row) {
@@ -693,6 +980,91 @@ function reminderMessage(plan, installment) {
   return `Dear Parent,\nThis is a reminder that ${Number(installment.amount || plan.dueAmount || 0).toLocaleString('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 })} fee installment for ${plan.studentName} is due on ${installment.dueDate || plan.nextDueDate}.\nKindly pay before the due date.\nProTrack Kaizen, Miraku Education Foundation.`;
 }
 
+function parseJson(value, fallback = {}) {
+  if (!value) return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch (err) {
+    return fallback;
+  }
+}
+
+function normalizeIndianPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.length === 10) return `91${digits}`;
+  return digits;
+}
+
+function parentPhoneFromStudentData(studentData) {
+  const data = parseJson(studentData);
+  return normalizeIndianPhone(
+    data.whatsapp ||
+    data.primaryPhone ||
+    data.parentMobile ||
+    data.fatherPhone ||
+    data.motherPhone ||
+    data.phone
+  );
+}
+
+function whatsappConfig() {
+  return {
+    accessToken: process.env.WHATSAPP_ACCESS_TOKEN || '',
+    phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
+    apiVersion: process.env.WHATSAPP_API_VERSION || 'v20.0',
+  };
+}
+
+function isWhatsAppConfigured() {
+  const config = whatsappConfig();
+  return Boolean(config.accessToken && config.phoneNumberId);
+}
+
+async function sendWhatsAppText(to, message) {
+  const config = whatsappConfig();
+  const phone = normalizeIndianPhone(to);
+  if (!phone) return { ok: false, status: 'Missing Phone', provider: 'whatsapp_cloud', error: 'Missing parent phone' };
+  if (!isWhatsAppConfigured()) return { ok: false, status: 'Queued', provider: 'manual', error: 'WhatsApp Cloud API is not configured' };
+
+  const response = await fetch(`https://graph.facebook.com/${config.apiVersion}/${config.phoneNumberId}/messages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: phone,
+      type: 'text',
+      text: {
+        preview_url: false,
+        body: message,
+      },
+    }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return { ok: false, status: 'Failed', provider: 'whatsapp_cloud', error: body.error?.message || response.statusText, response: body };
+  }
+  return { ok: true, status: 'Sent', provider: 'whatsapp_cloud', response: body };
+}
+
+function renderTemplateText(template, values) {
+  return String(template || '').replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, key) => {
+    const value = values[key];
+    return value === undefined || value === null ? '' : String(value);
+  });
+}
+
+async function renderMessageTemplate(templateKey, values, fallback) {
+  const row = await get(`SELECT * FROM message_templates WHERE templateKey = ? AND COALESCE(status, 'Active') = ?`, [templateKey, 'Active']);
+  if (!row?.body) return fallback;
+  return renderTemplateText(row.body, values);
+}
+
 async function writeFeeAudit(entityType, entityId, action, oldValue, newValue, changedBy) {
   await run(
     `INSERT INTO fee_audit_logs (entityType, entityId, action, oldValue, newValue, changedBy, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -700,7 +1072,9 @@ async function writeFeeAudit(entityType, entityId, action, oldValue, newValue, c
   );
 }
 
-async function loadFeePlansWithPaid() {
+async function loadFeePlansWithPaid(tenantId = null) {
+  const tenantFilter = tenantId ? 'WHERE fee_plans.tenant_id = ?' : '';
+  const params = tenantId ? [tenantId] : [];
   const rows = await all(
     `SELECT
       fee_plans.*,
@@ -709,15 +1083,117 @@ async function loadFeePlansWithPaid() {
     FROM fee_plans
     INNER JOIN students ON students.id = fee_plans.student_id
     LEFT JOIN fee_payments ON fee_payments.fee_plan_id = fee_plans.id AND COALESCE(fee_payments.status, 'Active') != 'Cancelled'
+    ${tenantFilter}
     GROUP BY fee_plans.id, students.name
-    ORDER BY fee_plans.updatedAt DESC, fee_plans.id DESC`
+    ORDER BY fee_plans.updatedAt DESC, fee_plans.id DESC`,
+    params
   );
   return attachFeeDetailsMany(rows);
 }
 
+async function buildStudentCommunicationTimeline(studentId, options = {}) {
+  const limit = Number(options.limit || 100);
+  const [parentAlerts, parentCalls, feeReminders, parentReports, payments, history] = await Promise.all([
+    all(`SELECT * FROM parent_alert_logs WHERE student_id = ? ORDER BY sentAt DESC, id DESC LIMIT ?`, [studentId, limit]),
+    all(`SELECT * FROM parent_call_logs WHERE student_id = ? ORDER BY calledAt DESC, id DESC LIMIT ?`, [studentId, limit]),
+    all(`SELECT * FROM fee_reminders WHERE student_id = ? ORDER BY sentAt DESC, id DESC LIMIT ?`, [studentId, limit]),
+    all(`SELECT * FROM parent_report_logs WHERE student_id = ? ORDER BY sentAt DESC, id DESC LIMIT ?`, [studentId, limit]),
+    all(
+      `SELECT fee_payments.*, fee_plans.courseProgram, fee_plans.feeCategory
+       FROM fee_payments
+       LEFT JOIN fee_plans ON fee_plans.id = fee_payments.fee_plan_id
+       WHERE fee_payments.student_id = ? AND COALESCE(fee_payments.status, 'Active') != 'Cancelled'
+       ORDER BY fee_payments.paymentDate DESC, fee_payments.id DESC
+       LIMIT ?`,
+      [studentId, limit]
+    ),
+    all(`SELECT * FROM student_history WHERE student_id = ? ORDER BY eventDate DESC, id DESC LIMIT ?`, [studentId, limit]),
+  ]);
+
+  const moneyText = (value) => Number(value || 0).toLocaleString('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 });
+  const timeline = [
+    ...parentAlerts.map((item) => ({
+      id: `attendance-alert-${item.id}`,
+      sourceId: item.id,
+      type: 'Attendance Alert',
+      channel: item.channel || 'WhatsApp',
+      status: item.status || item.delivery || '',
+      date: item.sentAt || item.createdAt,
+      title: item.alertType || 'Attendance alert',
+      detail: item.message,
+      triggeredBy: item.channel || 'System',
+    })),
+    ...parentCalls.map((item) => ({
+      id: `parent-call-${item.id}`,
+      sourceId: item.id,
+      type: 'Parent Call',
+      channel: 'Phone',
+      status: item.callOutcome || '',
+      date: item.calledAt || item.createdAt,
+      title: item.callOutcome || 'Parent call',
+      detail: item.notes,
+      triggeredBy: item.calledBy || 'Staff',
+    })),
+    ...feeReminders.map((item) => ({
+      id: `fee-reminder-${item.id}`,
+      sourceId: item.id,
+      type: 'Fee Reminder',
+      channel: item.sentVia || 'WhatsApp',
+      status: item.status || '',
+      date: item.sentAt || item.createdAt,
+      title: item.reminderType || 'Fee reminder',
+      detail: item.message,
+      triggeredBy: item.sentVia || 'System',
+    })),
+    ...parentReports.map((item) => ({
+      id: `test-parent-report-${item.id}`,
+      sourceId: item.id,
+      type: 'Test Result Message',
+      channel: item.sentVia || 'WhatsApp',
+      status: item.status || '',
+      date: item.sentAt,
+      title: `Marks ${item.marksObtained || 0}/${item.totalMarks || 0}`,
+      detail: [item.teacherRemark, item.requiredAction].filter(Boolean).join('\n'),
+      triggeredBy: item.sentVia || 'Academic',
+    })),
+    ...payments.map((item) => ({
+      id: `payment-receipt-${item.id}`,
+      sourceId: item.id,
+      type: 'Payment Receipt',
+      channel: item.paymentMethod || 'Receipt',
+      status: item.status || 'Active',
+      date: item.paymentDate || item.createdAt,
+      title: item.receiptNumber || 'Receipt',
+      detail: `${moneyText(item.amount)} received for ${item.courseProgram || item.feeCategory || 'fees'}.`,
+      triggeredBy: item.receivedBy || 'Accounts',
+    })),
+    ...history.map((item) => ({
+      id: `history-${item.id}`,
+      sourceId: item.id,
+      type: item.type || 'Note',
+      channel: 'Internal',
+      status: '',
+      date: item.eventDate || item.createdAt,
+      title: item.title || item.type || 'Note',
+      detail: item.detail,
+      triggeredBy: 'Staff',
+    })),
+  ].sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+
+  return {
+    timeline: timeline.slice(0, limit),
+    parentAlerts,
+    parentCalls,
+    feeReminders,
+    parentReports,
+    payments,
+    history,
+  };
+}
+
 app.get('/api/students/:id/360', authMiddleware, async (req, res) => {
   const { id } = req.params;
-  const student = await get(`SELECT * FROM students WHERE id = ?`, [id]);
+  const student = await get(`SELECT * FROM students WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
   if (!student) return res.status(404).json({ error: 'Student not found' });
 
   const feePlanRows = await all(
@@ -725,19 +1201,19 @@ app.get('/api/students/:id/360', authMiddleware, async (req, res) => {
      FROM fee_plans
      INNER JOIN students ON students.id = fee_plans.student_id
      LEFT JOIN fee_payments ON fee_payments.fee_plan_id = fee_plans.id AND COALESCE(fee_payments.status, 'Active') != 'Cancelled'
-     WHERE fee_plans.student_id = ?
+     WHERE fee_plans.student_id = ? AND fee_plans.tenant_id = ?
      GROUP BY fee_plans.id, students.name
      ORDER BY fee_plans.updatedAt DESC`,
-    [id]
+    [id, currentTenantId(req)]
   );
   const feePlans = await attachFeeDetailsMany(feePlanRows);
   const payments = await all(
     `SELECT fee_payments.*, fee_plans.courseProgram AS courseProgram, fee_plans.feeCategory AS feeCategory
      FROM fee_payments
      LEFT JOIN fee_plans ON fee_plans.id = fee_payments.fee_plan_id
-     WHERE fee_payments.student_id = ? AND COALESCE(fee_payments.status, 'Active') != 'Cancelled'
+     WHERE fee_payments.student_id = ? AND fee_payments.tenant_id = ? AND COALESCE(fee_payments.status, 'Active') != 'Cancelled'
      ORDER BY fee_payments.paymentDate DESC, fee_payments.id DESC`,
-    [id]
+    [id, currentTenantId(req)]
   );
   const attendance = await all(
     `SELECT attendance_records.*, attendance_sessions.date, attendance_sessions.batch, attendance_sessions.course, attendance_sessions.subject, attendance_sessions.teacherName, attendance_sessions.startTime
@@ -747,9 +1223,15 @@ app.get('/api/students/:id/360', authMiddleware, async (req, res) => {
      ORDER BY attendance_sessions.date DESC, attendance_sessions.startTime DESC`,
     [id]
   );
-  const parentAlerts = await all(`SELECT * FROM parent_alert_logs WHERE student_id = ? ORDER BY sentAt DESC, id DESC LIMIT 50`, [id]);
-  const parentCalls = await all(`SELECT * FROM parent_call_logs WHERE student_id = ? ORDER BY calledAt DESC, id DESC LIMIT 50`, [id]);
-  const feeReminders = await all(`SELECT * FROM fee_reminders WHERE student_id = ? ORDER BY sentAt DESC, id DESC LIMIT 50`, [id]);
+  const communication = await buildStudentCommunicationTimeline(id, { limit: 100 });
+  const followUps = await all(
+    `SELECT follow_up_tasks.*, COALESCE(students.name, follow_up_tasks.studentName) AS studentName
+     FROM follow_up_tasks
+     LEFT JOIN students ON students.id = follow_up_tasks.student_id
+     WHERE follow_up_tasks.student_id = ?
+     ORDER BY ${followUpOrderSql()}`,
+    [id]
+  );
   const history = await all(`SELECT * FROM student_history WHERE student_id = ? ORDER BY eventDate DESC, id DESC`, [id]);
   const academicResults = await all(`SELECT * FROM student_test_results WHERE student_id = ? ORDER BY updatedAt DESC, id DESC LIMIT 50`, [id]);
   const performanceResults = await all(`SELECT * FROM performance_results WHERE student_id = ? ORDER BY updatedAt DESC, id DESC LIMIT 50`, [id]);
@@ -769,10 +1251,10 @@ app.get('/api/students/:id/360', authMiddleware, async (req, res) => {
 
   res.json({
     student: { ...student, data: student.data ? JSON.parse(student.data) : {} },
-    fees: { plans: feePlans, payments, reminders: feeReminders, totals: feeTotals },
+    fees: { plans: feePlans, payments, reminders: communication.feeReminders, totals: feeTotals },
     attendance: { rows: attendance, totals: { total: attendance.length, attended, absent, late, attendancePercent } },
     academics: { academicResults, performanceResults, remedialActions, remedialStudents },
-    communication: { parentAlerts, parentCalls, feeReminders, history },
+    communication: { ...communication, history, followUps: followUps.map(normalizeFollowUpTask) },
   });
 });
 
@@ -818,7 +1300,7 @@ function expenseDateForMonth(month, dayOfMonth) {
   return `${month}-${String(safeDay).padStart(2, '0')}`;
 }
 
-async function createExpenseFromRecurringTemplate(template, month, username) {
+async function createExpenseFromRecurringTemplate(template, month, username, tenantId = null) {
   const normalized = normalizeRecurringExpense(template);
   if (!normalized || normalized.status !== 'Active') return { skipped: true, reason: 'inactive' };
   if (normalized.frequency !== 'Monthly') return { skipped: true, reason: 'unsupported frequency' };
@@ -826,16 +1308,17 @@ async function createExpenseFromRecurringTemplate(template, month, username) {
   if (normalized.endMonth && month > normalized.endMonth) return { skipped: true, reason: 'after end month' };
 
   const marker = `[Recurring ${normalized.id} ${month}]`;
-  const existing = await get(`SELECT * FROM expenses WHERE remarks LIKE ? LIMIT 1`, [`%${marker}%`]);
+  const existing = await get(`SELECT * FROM expenses WHERE remarks LIKE ? AND tenant_id = ? LIMIT 1`, [`%${marker}%`, tenantId]);
   if (existing) return { skipped: true, reason: 'already generated', expense: normalizeExpense(existing) };
 
   const now = new Date().toISOString();
   const date = expenseDateForMonth(month, normalized.dayOfMonth);
   const remarks = `${normalized.remarks || normalized.templateName || 'Recurring expense'} ${marker}`;
   const result = await run(
-    `INSERT INTO expenses (expenseId, date, branch, category, subCategory, expenseType, amount, vendor_id, paidTo, vendorMobile, paymentMode, paidBy, requestedBy, approvedBy, billUploaded, gstBill, billUrl, remarks, status, approvalRequired, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO expenses (tenant_id, expenseId, date, branch, category, subCategory, expenseType, amount, vendor_id, paidTo, vendorMobile, paymentMode, paidBy, requestedBy, approvedBy, billUploaded, gstBill, billUrl, remarks, status, approvalRequired, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
+      tenantId,
       `PENDING-${Date.now()}`,
       date,
       normalized.branch || 'Tembhurni',
@@ -862,20 +1345,20 @@ async function createExpenseFromRecurringTemplate(template, month, username) {
   );
   await run(`UPDATE expenses SET expenseId = ? WHERE id = ?`, [makeExpenseNumber(result.lastID), result.lastID]);
   await run(`UPDATE recurring_expense_templates SET lastGeneratedMonth = ?, updatedAt = ? WHERE id = ?`, [month, now, normalized.id]);
-  return { skipped: false, expense: normalizeExpense(await get(`SELECT * FROM expenses WHERE id = ?`, [result.lastID])) };
+  return { skipped: false, expense: normalizeExpense(await get(`SELECT * FROM expenses WHERE id = ? AND tenant_id = ?`, [result.lastID, tenantId])) };
 }
 
-async function createPettyCashEntryForExpense(expense) {
+async function createPettyCashEntryForExpense(expense, tenantId = null) {
   if (expense.paymentMode !== 'Cash' || expense.status !== 'Paid') return;
   const branch = expense.branch || 'Tembhurni';
-  const latest = await get(`SELECT * FROM petty_cash_entries WHERE branch = ? ORDER BY date DESC, id DESC LIMIT 1`, [branch]);
+  const latest = await get(`SELECT * FROM petty_cash_entries WHERE branch = ? AND tenant_id = ? ORDER BY date DESC, id DESC LIMIT 1`, [branch, tenantId]);
   const openingCash = Number(latest?.closingCash || 0);
   const paidAmount = Number(expense.netPaid || expense.amount || 0);
   const closingCash = openingCash - paidAmount;
   await run(
-    `INSERT INTO petty_cash_entries (date, branch, cashFlowType, amount, openingCash, closingCash, referenceType, referenceId, remarks, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [expense.paymentDate || expense.date, branch, 'Expense', paidAmount, openingCash, closingCash, 'Expense', expense.id, expense.remarks || expense.category, new Date().toISOString()]
+    `INSERT INTO petty_cash_entries (tenant_id, date, branch, cashFlowType, amount, openingCash, closingCash, referenceType, referenceId, remarks, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [tenantId, expense.paymentDate || expense.date, branch, 'Expense', paidAmount, openingCash, closingCash, 'Expense', expense.id, expense.remarks || expense.category, new Date().toISOString()]
   );
 }
 
@@ -885,9 +1368,11 @@ app.get('/api/vendors', authMiddleware, async (req, res) => {
       COALESCE(SUM(CASE WHEN expenses.status IN ('Approved', 'Bill Pending') THEN expenses.amount ELSE 0 END), 0) AS pendingAmount,
       MAX(CASE WHEN expenses.status = 'Paid' THEN expenses.date ELSE NULL END) AS lastPaymentDate
      FROM vendors
-     LEFT JOIN expenses ON expenses.vendor_id = vendors.id
+     LEFT JOIN expenses ON expenses.vendor_id = vendors.id AND expenses.tenant_id = vendors.tenant_id
+     WHERE vendors.tenant_id = ?
      GROUP BY vendors.id
-     ORDER BY vendors.vendorName ASC`
+     ORDER BY vendors.vendorName ASC`,
+    [currentTenantId(req)]
   );
   res.json(rows.map((row) => ({ ...row, totalPaid: Number(row.totalPaid || 0), pendingAmount: Number(row.pendingAmount || 0) })));
 });
@@ -898,27 +1383,29 @@ app.post('/api/vendors', authMiddleware, async (req, res) => {
   if (validationError) return res.status(400).json({ error: validationError });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO vendors (vendorName, vendorType, mobileNumber, address, gstNumber, bankDetails, notes, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [vendorName, vendorType, mobileNumber, address, gstNumber, bankDetails, notes, now, now]
+    `INSERT INTO vendors (tenant_id, vendorName, vendorType, mobileNumber, address, gstNumber, bankDetails, notes, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), vendorName, vendorType, mobileNumber, address, gstNumber, bankDetails, notes, now, now]
   );
-  res.json(await get(`SELECT * FROM vendors WHERE id = ?`, [result.lastID]));
+  res.json(await get(`SELECT * FROM vendors WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]));
 });
 
 app.put('/api/vendors/:id', authMiddleware, async (req, res) => {
   const { vendorName, vendorType, mobileNumber, address, gstNumber, bankDetails, notes } = req.body;
+  const existing = await get(`SELECT * FROM vendors WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Vendor not found' });
   await run(
-    `UPDATE vendors SET vendorName = ?, vendorType = ?, mobileNumber = ?, address = ?, gstNumber = ?, bankDetails = ?, notes = ?, updatedAt = ? WHERE id = ?`,
-    [vendorName, vendorType, mobileNumber, address, gstNumber, bankDetails, notes, new Date().toISOString(), req.params.id]
+    `UPDATE vendors SET vendorName = ?, vendorType = ?, mobileNumber = ?, address = ?, gstNumber = ?, bankDetails = ?, notes = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`,
+    [vendorName, vendorType, mobileNumber, address, gstNumber, bankDetails, notes, new Date().toISOString(), req.params.id, currentTenantId(req)]
   );
-  const row = await get(`SELECT * FROM vendors WHERE id = ?`, [req.params.id]);
+  const row = await get(`SELECT * FROM vendors WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   if (!row) return res.status(404).json({ error: 'Vendor not found' });
   res.json(row);
 });
 
 app.delete('/api/vendors/:id', authMiddleware, requireRole('admin'), async (req, res) => {
-  await run(`UPDATE expenses SET vendor_id = NULL WHERE vendor_id = ?`, [req.params.id]);
-  await run(`DELETE FROM vendors WHERE id = ?`, [req.params.id]);
+  await run(`UPDATE expenses SET vendor_id = NULL WHERE vendor_id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  await run(`DELETE FROM vendors WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -927,7 +1414,9 @@ app.get('/api/expenses', authMiddleware, requireAnyRole(expenseRoles), async (re
     `SELECT expenses.*, vendors.vendorName AS vendorName, vendors.vendorType AS vendorType
      FROM expenses
      LEFT JOIN vendors ON vendors.id = expenses.vendor_id
-     ORDER BY expenses.date DESC, expenses.id DESC`
+     WHERE expenses.tenant_id = ?
+     ORDER BY expenses.date DESC, expenses.id DESC`,
+    [currentTenantId(req)]
   );
   res.json(rows.map(normalizeExpense));
 });
@@ -938,59 +1427,59 @@ app.post('/api/expenses', authMiddleware, requireAnyRole(expenseRoles), async (r
   if (validationError) return res.status(400).json({ error: validationError });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO expenses (expenseId, date, branch, category, subCategory, expenseType, amount, vendor_id, paidTo, vendorMobile, paymentMode, paidBy, paymentDate, transactionId, deductionAmount, bonusAmount, netPaid, requestedBy, approvedBy, billUploaded, gstBill, billUrl, remarks, status, approvalRequired, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [`PENDING-${Date.now()}`, date, branch, category, subCategory, expenseType, Number(amount), vendor_id || null, paidTo, vendorMobile, paymentMode, paidBy, paymentDate, transactionId, Number(deductionAmount || 0), Number(bonusAmount || 0), Number(netPaid || 0), requestedBy || req.user.username, approvedBy, billUploaded ? 1 : 0, gstBill ? 1 : 0, billUrl, remarks, status, expenseApprovalRequired(amount), now, now]
+    `INSERT INTO expenses (tenant_id, expenseId, date, branch, category, subCategory, expenseType, amount, vendor_id, paidTo, vendorMobile, paymentMode, paidBy, paymentDate, transactionId, deductionAmount, bonusAmount, netPaid, requestedBy, approvedBy, billUploaded, gstBill, billUrl, remarks, status, approvalRequired, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), `PENDING-${Date.now()}`, date, branch, category, subCategory, expenseType, Number(amount), vendor_id || null, paidTo, vendorMobile, paymentMode, paidBy, paymentDate, transactionId, Number(deductionAmount || 0), Number(bonusAmount || 0), Number(netPaid || 0), requestedBy || req.user.username, approvedBy, billUploaded ? 1 : 0, gstBill ? 1 : 0, billUrl, remarks, status, expenseApprovalRequired(amount), now, now]
   );
   await run(`UPDATE expenses SET expenseId = ? WHERE id = ?`, [makeExpenseNumber(result.lastID), result.lastID]);
-  const row = normalizeExpense(await get(`SELECT * FROM expenses WHERE id = ?`, [result.lastID]));
-  await createPettyCashEntryForExpense(row);
+  const row = normalizeExpense(await get(`SELECT * FROM expenses WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]));
+  await createPettyCashEntryForExpense(row, currentTenantId(req));
   res.json(row);
 });
 
 app.put('/api/expenses/:id', authMiddleware, requireAnyRole(expenseRoles), async (req, res) => {
   const { date, branch = 'Tembhurni', category, subCategory, expenseType = 'Variable', amount, vendor_id, paidTo, vendorMobile, paymentMode = 'Cash', paidBy, paymentDate, transactionId, deductionAmount = 0, bonusAmount = 0, netPaid = 0, requestedBy, approvedBy, billUploaded = false, gstBill = false, billUrl, remarks, status = 'Requested' } = req.body;
-  const existing = await get(`SELECT * FROM expenses WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT * FROM expenses WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'Expense not found' });
   await run(
-    `UPDATE expenses SET date = ?, branch = ?, category = ?, subCategory = ?, expenseType = ?, amount = ?, vendor_id = ?, paidTo = ?, vendorMobile = ?, paymentMode = ?, paidBy = ?, paymentDate = ?, transactionId = ?, deductionAmount = ?, bonusAmount = ?, netPaid = ?, requestedBy = ?, approvedBy = ?, billUploaded = ?, gstBill = ?, billUrl = ?, remarks = ?, status = ?, approvalRequired = ?, updatedAt = ? WHERE id = ?`,
-    [date, branch, category, subCategory, expenseType, Number(amount), vendor_id || null, paidTo, vendorMobile, paymentMode, paidBy, paymentDate, transactionId, Number(deductionAmount || 0), Number(bonusAmount || 0), Number(netPaid || 0), requestedBy, approvedBy, billUploaded ? 1 : 0, gstBill ? 1 : 0, billUrl, remarks, status, expenseApprovalRequired(amount), new Date().toISOString(), req.params.id]
+    `UPDATE expenses SET date = ?, branch = ?, category = ?, subCategory = ?, expenseType = ?, amount = ?, vendor_id = ?, paidTo = ?, vendorMobile = ?, paymentMode = ?, paidBy = ?, paymentDate = ?, transactionId = ?, deductionAmount = ?, bonusAmount = ?, netPaid = ?, requestedBy = ?, approvedBy = ?, billUploaded = ?, gstBill = ?, billUrl = ?, remarks = ?, status = ?, approvalRequired = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`,
+    [date, branch, category, subCategory, expenseType, Number(amount), vendor_id || null, paidTo, vendorMobile, paymentMode, paidBy, paymentDate, transactionId, Number(deductionAmount || 0), Number(bonusAmount || 0), Number(netPaid || 0), requestedBy, approvedBy, billUploaded ? 1 : 0, gstBill ? 1 : 0, billUrl, remarks, status, expenseApprovalRequired(amount), new Date().toISOString(), req.params.id, currentTenantId(req)]
   );
-  const row = normalizeExpense(await get(`SELECT * FROM expenses WHERE id = ?`, [req.params.id]));
-  if (existing.status !== 'Paid') await createPettyCashEntryForExpense(row);
+  const row = normalizeExpense(await get(`SELECT * FROM expenses WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]));
+  if (existing.status !== 'Paid') await createPettyCashEntryForExpense(row, currentTenantId(req));
   res.json(row);
 });
 
 app.patch('/api/expenses/:id/approve', authMiddleware, requireAnyRole(adminRoles), async (req, res) => {
-  await run(`UPDATE expenses SET status = ?, approvedBy = ?, updatedAt = ? WHERE id = ?`, ['Approved', req.user.username, new Date().toISOString(), req.params.id]);
-  res.json(normalizeExpense(await get(`SELECT * FROM expenses WHERE id = ?`, [req.params.id])));
+  await run(`UPDATE expenses SET status = ?, approvedBy = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`, ['Approved', req.user.username, new Date().toISOString(), req.params.id, currentTenantId(req)]);
+  res.json(normalizeExpense(await get(`SELECT * FROM expenses WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)])));
 });
 
 app.patch('/api/expenses/:id/reject', authMiddleware, requireAnyRole(adminRoles), async (req, res) => {
-  await run(`UPDATE expenses SET status = ?, approvedBy = ?, updatedAt = ? WHERE id = ?`, ['Rejected', req.user.username, new Date().toISOString(), req.params.id]);
-  res.json(normalizeExpense(await get(`SELECT * FROM expenses WHERE id = ?`, [req.params.id])));
+  await run(`UPDATE expenses SET status = ?, approvedBy = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`, ['Rejected', req.user.username, new Date().toISOString(), req.params.id, currentTenantId(req)]);
+  res.json(normalizeExpense(await get(`SELECT * FROM expenses WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)])));
 });
 
 app.patch('/api/expenses/:id/pay', authMiddleware, requireAnyRole(paymentRoles), async (req, res) => {
-  const existing = await get(`SELECT * FROM expenses WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT * FROM expenses WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'Expense not found' });
   const status = Number(existing.billUploaded || 0) ? 'Paid' : 'Bill Pending';
   const paymentDate = existing.paymentDate || new Date().toISOString().slice(0, 10);
   const netPaid = Number(existing.netPaid || existing.amount || 0);
-  await run(`UPDATE expenses SET status = ?, paidBy = ?, paymentDate = ?, netPaid = ?, updatedAt = ? WHERE id = ?`, [status, req.user.username, paymentDate, netPaid, new Date().toISOString(), req.params.id]);
-  const row = normalizeExpense(await get(`SELECT * FROM expenses WHERE id = ?`, [req.params.id]));
-  await createPettyCashEntryForExpense({ ...row, status: 'Paid' });
+  await run(`UPDATE expenses SET status = ?, paidBy = ?, paymentDate = ?, netPaid = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`, [status, req.user.username, paymentDate, netPaid, new Date().toISOString(), req.params.id, currentTenantId(req)]);
+  const row = normalizeExpense(await get(`SELECT * FROM expenses WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]));
+  await createPettyCashEntryForExpense({ ...row, status: 'Paid' }, currentTenantId(req));
   res.json(row);
 });
 
 app.delete('/api/expenses/:id', authMiddleware, requireRole('admin'), async (req, res) => {
-  await run(`DELETE FROM petty_cash_entries WHERE referenceType = ? AND referenceId = ?`, ['Expense', req.params.id]);
-  await run(`DELETE FROM expenses WHERE id = ?`, [req.params.id]);
+  await run(`DELETE FROM petty_cash_entries WHERE referenceType = ? AND referenceId = ? AND tenant_id = ?`, ['Expense', req.params.id, currentTenantId(req)]);
+  await run(`DELETE FROM expenses WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 app.get('/api/recurring-expenses', authMiddleware, requireAnyRole(expenseRoles), async (req, res) => {
-  const rows = await all(`SELECT * FROM recurring_expense_templates ORDER BY status ASC, category ASC, templateName ASC`);
+  const rows = await all(`SELECT * FROM recurring_expense_templates WHERE tenant_id = ? ORDER BY status ASC, category ASC, templateName ASC`, [currentTenantId(req)]);
   res.json(rows.map(normalizeRecurringExpense));
 });
 
@@ -1021,15 +1510,15 @@ app.post('/api/recurring-expenses', authMiddleware, requireAnyRole(expenseRoles)
   if (validationError) return res.status(400).json({ error: validationError });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO recurring_expense_templates (templateName, branch, category, subCategory, expenseType, amount, paidTo, vendorMobile, paymentMode, requestedBy, approvedBy, billUploaded, gstBill, billUrl, remarks, status, frequency, startMonth, endMonth, dayOfMonth, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [templateName, branch, category, subCategory, expenseType, Number(amount), paidTo, vendorMobile, paymentMode, requestedBy || req.user.username, approvedBy || req.user.username, billUploaded ? 1 : 0, gstBill ? 1 : 0, billUrl, remarks, status, frequency, startMonth, endMonth || null, Number(dayOfMonth || 1), now, now]
+    `INSERT INTO recurring_expense_templates (tenant_id, templateName, branch, category, subCategory, expenseType, amount, paidTo, vendorMobile, paymentMode, requestedBy, approvedBy, billUploaded, gstBill, billUrl, remarks, status, frequency, startMonth, endMonth, dayOfMonth, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), templateName, branch, category, subCategory, expenseType, Number(amount), paidTo, vendorMobile, paymentMode, requestedBy || req.user.username, approvedBy || req.user.username, billUploaded ? 1 : 0, gstBill ? 1 : 0, billUrl, remarks, status, frequency, startMonth, endMonth || null, Number(dayOfMonth || 1), now, now]
   );
-  res.json(normalizeRecurringExpense(await get(`SELECT * FROM recurring_expense_templates WHERE id = ?`, [result.lastID])));
+  res.json(normalizeRecurringExpense(await get(`SELECT * FROM recurring_expense_templates WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)])));
 });
 
 app.put('/api/recurring-expenses/:id', authMiddleware, requireAnyRole(expenseRoles), async (req, res) => {
-  const existing = await get(`SELECT * FROM recurring_expense_templates WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT * FROM recurring_expense_templates WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'Recurring expense template not found' });
   const {
     templateName,
@@ -1056,25 +1545,25 @@ app.put('/api/recurring-expenses/:id', authMiddleware, requireAnyRole(expenseRol
   const validationError = requireFields({ templateName, category, amount, paidTo, startMonth }, ['templateName', 'category', 'amount', 'paidTo', 'startMonth']);
   if (validationError) return res.status(400).json({ error: validationError });
   await run(
-    `UPDATE recurring_expense_templates SET templateName = ?, branch = ?, category = ?, subCategory = ?, expenseType = ?, amount = ?, paidTo = ?, vendorMobile = ?, paymentMode = ?, requestedBy = ?, approvedBy = ?, billUploaded = ?, gstBill = ?, billUrl = ?, remarks = ?, status = ?, frequency = ?, startMonth = ?, endMonth = ?, dayOfMonth = ?, updatedAt = ? WHERE id = ?`,
-    [templateName, branch, category, subCategory, expenseType, Number(amount), paidTo, vendorMobile, paymentMode, requestedBy, approvedBy, billUploaded ? 1 : 0, gstBill ? 1 : 0, billUrl, remarks, status, frequency, startMonth, endMonth || null, Number(dayOfMonth || 1), new Date().toISOString(), req.params.id]
+    `UPDATE recurring_expense_templates SET templateName = ?, branch = ?, category = ?, subCategory = ?, expenseType = ?, amount = ?, paidTo = ?, vendorMobile = ?, paymentMode = ?, requestedBy = ?, approvedBy = ?, billUploaded = ?, gstBill = ?, billUrl = ?, remarks = ?, status = ?, frequency = ?, startMonth = ?, endMonth = ?, dayOfMonth = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`,
+    [templateName, branch, category, subCategory, expenseType, Number(amount), paidTo, vendorMobile, paymentMode, requestedBy, approvedBy, billUploaded ? 1 : 0, gstBill ? 1 : 0, billUrl, remarks, status, frequency, startMonth, endMonth || null, Number(dayOfMonth || 1), new Date().toISOString(), req.params.id, currentTenantId(req)]
   );
-  res.json(normalizeRecurringExpense(await get(`SELECT * FROM recurring_expense_templates WHERE id = ?`, [req.params.id])));
+  res.json(normalizeRecurringExpense(await get(`SELECT * FROM recurring_expense_templates WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)])));
 });
 
 app.delete('/api/recurring-expenses/:id', authMiddleware, requireRole('admin'), async (req, res) => {
-  await run(`DELETE FROM recurring_expense_templates WHERE id = ?`, [req.params.id]);
+  await run(`DELETE FROM recurring_expense_templates WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 app.post('/api/recurring-expenses/generate', authMiddleware, requireAnyRole(expenseRoles), async (req, res) => {
   const month = req.body.month || new Date().toISOString().slice(0, 7);
   if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM' });
-  const templates = await all(`SELECT * FROM recurring_expense_templates WHERE status = ? ORDER BY id ASC`, ['Active']);
+  const templates = await all(`SELECT * FROM recurring_expense_templates WHERE status = ? AND tenant_id = ? ORDER BY id ASC`, ['Active', currentTenantId(req)]);
   const created = [];
   const skipped = [];
   for (const template of templates) {
-    const result = await createExpenseFromRecurringTemplate(template, month, req.user.username);
+    const result = await createExpenseFromRecurringTemplate(template, month, req.user.username, currentTenantId(req));
     if (result.skipped) skipped.push({ templateId: template.id, templateName: template.templateName, reason: result.reason });
     else created.push(result.expense);
   }
@@ -1082,7 +1571,7 @@ app.post('/api/recurring-expenses/generate', authMiddleware, requireAnyRole(expe
 });
 
 app.get('/api/petty-cash', authMiddleware, requireAnyRole(expenseRoles), async (req, res) => {
-  const rows = await all(`SELECT * FROM petty_cash_entries ORDER BY date DESC, id DESC LIMIT 100`);
+  const rows = await all(`SELECT * FROM petty_cash_entries WHERE tenant_id = ? ORDER BY date DESC, id DESC LIMIT 100`, [currentTenantId(req)]);
   res.json(rows.map((row) => ({ ...row, amount: Number(row.amount || 0), openingCash: Number(row.openingCash || 0), closingCash: Number(row.closingCash || 0) })));
 });
 
@@ -1090,25 +1579,25 @@ app.post('/api/petty-cash', authMiddleware, requireAnyRole(expenseRoles), async 
   const { date, branch = 'Tembhurni', cashFlowType = 'Cash Added', amount, remarks } = req.body;
   const validationError = requireFields(req.body, ['date', 'amount']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const latest = await get(`SELECT * FROM petty_cash_entries WHERE branch = ? ORDER BY date DESC, id DESC LIMIT 1`, [branch]);
+  const latest = await get(`SELECT * FROM petty_cash_entries WHERE branch = ? AND tenant_id = ? ORDER BY date DESC, id DESC LIMIT 1`, [branch, currentTenantId(req)]);
   const openingCash = Number(latest?.closingCash || 0);
   const closingCash = openingCash + (cashFlowType === 'Cash Added' ? Number(amount) : -Number(amount));
   const result = await run(
-    `INSERT INTO petty_cash_entries (date, branch, cashFlowType, amount, openingCash, closingCash, remarks, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [date, branch, cashFlowType, Number(amount), openingCash, closingCash, remarks, new Date().toISOString()]
+    `INSERT INTO petty_cash_entries (tenant_id, date, branch, cashFlowType, amount, openingCash, closingCash, remarks, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), date, branch, cashFlowType, Number(amount), openingCash, closingCash, remarks, new Date().toISOString()]
   );
-  res.json(await get(`SELECT * FROM petty_cash_entries WHERE id = ?`, [result.lastID]));
+  res.json(await get(`SELECT * FROM petty_cash_entries WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]));
 });
 
 app.delete('/api/petty-cash/:id', authMiddleware, requireRole('admin'), async (req, res) => {
-  await run(`DELETE FROM petty_cash_entries WHERE id = ?`, [req.params.id]);
+  await run(`DELETE FROM petty_cash_entries WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 app.get('/api/expense-reports', authMiddleware, requireAnyRole(expenseRoles), async (req, res) => {
   const month = req.query.month || new Date().toISOString().slice(0, 7);
-  const expenses = (await all(`SELECT expenses.*, vendors.vendorName AS vendorName FROM expenses LEFT JOIN vendors ON vendors.id = expenses.vendor_id WHERE expenses.date LIKE ? ORDER BY expenses.date DESC`, [`${month}%`])).map(normalizeExpense);
+  const expenses = (await all(`SELECT expenses.*, vendors.vendorName AS vendorName FROM expenses LEFT JOIN vendors ON vendors.id = expenses.vendor_id WHERE expenses.date LIKE ? AND expenses.tenant_id = ? ORDER BY expenses.date DESC`, [`${month}%`, currentTenantId(req)])).map(normalizeExpense);
   const paidExpenses = expenses.filter((expense) => expense.status === 'Paid' || expense.status === 'Bill Pending');
   const expenseValue = (expense) => Number(expense.netPaid || expense.amount || 0);
   const totalExpenses = paidExpenses.reduce((sum, expense) => sum + expenseValue(expense), 0);
@@ -1116,7 +1605,7 @@ app.get('/api/expense-reports', authMiddleware, requireAnyRole(expenseRoles), as
   const variableExpenses = paidExpenses.filter((expense) => expense.expenseType !== 'Fixed').reduce((sum, expense) => sum + expenseValue(expense), 0);
   const refunds = paidExpenses.filter((expense) => expense.category === 'Refunds').reduce((sum, expense) => sum + expenseValue(expense), 0);
   const pendingLiabilities = expenses.filter((expense) => expense.status === 'Approved' || expense.status === 'Bill Pending').reduce((sum, expense) => sum + expense.amount, 0);
-  const feeRows = await all(`SELECT COALESCE(SUM(amount), 0) AS amount FROM fee_payments WHERE paymentDate LIKE ? AND COALESCE(status, 'Active') != 'Cancelled'`, [`${month}%`]);
+  const feeRows = await all(`SELECT COALESCE(SUM(amount), 0) AS amount FROM fee_payments WHERE paymentDate LIKE ? AND tenant_id = ? AND COALESCE(status, 'Active') != 'Cancelled'`, [`${month}%`, currentTenantId(req)]);
   const totalIncome = Number(feeRows[0]?.amount || 0);
   const groupBy = (keyFn) => Object.values(paidExpenses.reduce((acc, expense) => {
     const key = keyFn(expense) || 'Unassigned';
@@ -1130,7 +1619,7 @@ app.get('/api/expense-reports', authMiddleware, requireAnyRole(expenseRoles), as
   const branchWise = groupBy((expense) => expense.branch).map((row) => ({ branch: row.name, income: totalIncome, expense: row.amount, profit: totalIncome - row.amount }));
   const billsUploaded = expenses.filter((expense) => expense.billUploaded).length;
   const marketingSpend = paidExpenses.filter((expense) => expense.category === 'Marketing').reduce((sum, expense) => sum + expenseValue(expense), 0);
-  const admissionsCount = Number((await get(`SELECT COUNT(*) AS count FROM admissions WHERE status != ?`, ['Rejected']))?.count || 0);
+  const admissionsCount = Number((await get(`SELECT COUNT(*) AS count FROM admissions WHERE status != ? AND tenant_id = ?`, ['Rejected', currentTenantId(req)]))?.count || 0);
   const netProfit = totalIncome - fixedExpenses - variableExpenses - refunds - pendingLiabilities;
   res.json({
     month,
@@ -1165,7 +1654,7 @@ app.get('/api/expense-reports', authMiddleware, requireAnyRole(expenseRoles), as
 
 // Fee plans and payments
 app.get('/api/fees/summary', authMiddleware, requireAnyRole(feeRoles), async (req, res) => {
-  const plans = await loadFeePlansWithPaid();
+  const plans = await loadFeePlansWithPaid(currentTenantId(req));
   const today = new Date().toISOString().slice(0, 10);
   const totals = plans.reduce(
     (acc, plan) => {
@@ -1182,13 +1671,13 @@ app.get('/api/fees/summary', authMiddleware, requireAnyRole(feeRoles), async (re
     },
     { totalFees: 0, totalDiscounts: 0, netFees: 0, collected: 0, pending: 0, overdue: 0, todayCollection: 0, overdueStudents: 0, fullyPaidStudents: 0, partiallyPaidStudents: 0 }
   );
-  const todayPayments = await all(`SELECT COALESCE(SUM(amount), 0) AS amount FROM fee_payments WHERE paymentDate = ? AND COALESCE(status, 'Active') != 'Cancelled'`, [today]);
+  const todayPayments = await all(`SELECT COALESCE(SUM(amount), 0) AS amount FROM fee_payments WHERE paymentDate = ? AND tenant_id = ? AND COALESCE(status, 'Active') != 'Cancelled'`, [today, currentTenantId(req)]);
   totals.todayCollection = Number(todayPayments[0]?.amount || 0);
   res.json({ totals, plans });
 });
 
 app.get('/api/fee-plans', authMiddleware, requireAnyRole(feeRoles), async (req, res) => {
-  res.json(await loadFeePlansWithPaid());
+  res.json(await loadFeePlansWithPaid(currentTenantId(req)));
 });
 
 function normalizeFeeStructure(row) {
@@ -1236,6 +1725,8 @@ app.delete('/api/fee-structures/:id', authMiddleware, requireRole('admin'), asyn
 
 app.get('/api/students/:id/fee-plans', authMiddleware, requireAnyRole(feeRoles), async (req, res) => {
   const { id } = req.params;
+  const student = await get(`SELECT id FROM students WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
+  if (!student) return res.status(404).json({ error: 'Student not found' });
   const rows = await all(
     `SELECT
       fee_plans.*,
@@ -1244,10 +1735,10 @@ app.get('/api/students/:id/fee-plans', authMiddleware, requireAnyRole(feeRoles),
     FROM fee_plans
     INNER JOIN students ON students.id = fee_plans.student_id
     LEFT JOIN fee_payments ON fee_payments.fee_plan_id = fee_plans.id AND COALESCE(fee_payments.status, 'Active') != 'Cancelled'
-    WHERE fee_plans.student_id = ?
+    WHERE fee_plans.student_id = ? AND fee_plans.tenant_id = ?
     GROUP BY fee_plans.id, students.name
     ORDER BY fee_plans.updatedAt DESC, fee_plans.id DESC`,
-    [id]
+    [id, currentTenantId(req)]
   );
   res.json(await attachFeeDetailsMany(rows));
 });
@@ -1277,17 +1768,18 @@ app.post('/api/fee-plans', authMiddleware, requireAnyRole(paymentRoles), async (
   if (Number(discountAmount || 0) > 0 && (!discountType || !discountReason || !approvedBy)) {
     return res.status(400).json({ error: 'Discount type, reason, and approved by are required when a discount is applied' });
   }
-  const student = await get(`SELECT * FROM students WHERE id = ?`, [student_id]);
+  const student = await get(`SELECT * FROM students WHERE id = ? AND tenant_id = ?`, [student_id, currentTenantId(req)]);
   if (!student) return res.status(404).json({ error: 'Student not found' });
   const now = new Date().toISOString();
   const result = await run(
     `INSERT INTO fee_plans (
-      student_id, courseProgram, feeCategory, paymentType, totalAmount, discountAmount,
+      tenant_id, student_id, courseProgram, feeCategory, paymentType, totalAmount, discountAmount,
       discountType, discountReason, approvedBy, discountApprovedDate, discountProofNote,
       feeStatus, statusUpdatedAt, dueDate, installmentLabel, notes, createdAt, updatedAt
     )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
+      currentTenantId(req),
       student_id,
       courseProgram,
       feeCategory || courseProgram,
@@ -1410,7 +1902,9 @@ app.get('/api/fee-payments', authMiddleware, requireAnyRole(feeRoles), async (re
     INNER JOIN students ON students.id = fee_payments.student_id
     INNER JOIN fee_plans ON fee_plans.id = fee_payments.fee_plan_id
     WHERE COALESCE(fee_payments.status, 'Active') != 'Cancelled'
-    ORDER BY fee_payments.paymentDate DESC, fee_payments.id DESC`
+      AND fee_payments.tenant_id = ?
+    ORDER BY fee_payments.paymentDate DESC, fee_payments.id DESC`,
+    [currentTenantId(req)]
   );
   res.json(rows.map((row) => ({ ...row, amount: Number(row.amount || 0) })));
 });
@@ -1432,8 +1926,8 @@ app.get('/api/fee-payments/:id', authMiddleware, requireAnyRole(feeRoles), async
     FROM fee_payments
     INNER JOIN students ON students.id = fee_payments.student_id
     INNER JOIN fee_plans ON fee_plans.id = fee_payments.fee_plan_id
-    WHERE fee_payments.id = ?`,
-    [id]
+    WHERE fee_payments.id = ? AND fee_payments.tenant_id = ?`,
+    [id, currentTenantId(req)]
   );
   if (!row) return res.status(404).json({ error: 'Payment not found' });
   res.json({ ...row, amount: Number(row.amount || 0), totalAmount: Number(row.totalAmount || 0), discountAmount: Number(row.discountAmount || 0) });
@@ -1443,13 +1937,13 @@ app.post('/api/fee-payments', authMiddleware, requireAnyRole(paymentRoles), asyn
   const { fee_plan_id, amount, paymentDate, paymentMethod, transactionId, receivedBy, receiptType = 'Non-GST Receipt', notes, remark } = req.body;
   const validationError = requireFields(req.body, ['fee_plan_id', 'amount', 'paymentDate', 'paymentMethod']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const plan = await get(`SELECT * FROM fee_plans WHERE id = ?`, [fee_plan_id]);
+  const plan = await get(`SELECT * FROM fee_plans WHERE id = ? AND tenant_id = ?`, [fee_plan_id, currentTenantId(req)]);
   if (!plan) return res.status(404).json({ error: 'Fee plan not found' });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO fee_payments (fee_plan_id, student_id, amount, paymentDate, paymentMethod, transactionId, receivedBy, receiptType, receiptNumber, notes, status, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [fee_plan_id, plan.student_id, Number(amount), paymentDate, paymentMethod, transactionId, receivedBy, receiptType, `PENDING-${Date.now()}`, notes || remark, 'Active', now]
+    `INSERT INTO fee_payments (tenant_id, fee_plan_id, student_id, amount, paymentDate, paymentMethod, transactionId, receivedBy, receiptType, receiptNumber, notes, status, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), fee_plan_id, plan.student_id, Number(amount), paymentDate, paymentMethod, transactionId, receivedBy, receiptType, `PENDING-${Date.now()}`, notes || remark, 'Active', now]
   );
   const receiptNumber = makeReceiptNumber(result.lastID);
   await run(`UPDATE fee_payments SET receiptNumber = ? WHERE id = ?`, [receiptNumber, result.lastID]);
@@ -1467,15 +1961,15 @@ app.post('/api/fee-payments', authMiddleware, requireAnyRole(paymentRoles), asyn
     FROM fee_payments
     INNER JOIN students ON students.id = fee_payments.student_id
     INNER JOIN fee_plans ON fee_plans.id = fee_payments.fee_plan_id
-    WHERE fee_payments.id = ?`,
-    [result.lastID]
+    WHERE fee_payments.id = ? AND fee_payments.tenant_id = ?`,
+    [result.lastID, currentTenantId(req)]
   );
   res.json({ ...payment, amount: Number(payment.amount || 0) });
 });
 
 app.delete('/api/fee-payments/:id', authMiddleware, requireAnyRole(paymentRoles), async (req, res) => {
   const { id } = req.params;
-  const payment = await get(`SELECT * FROM fee_payments WHERE id = ?`, [id]);
+  const payment = await get(`SELECT * FROM fee_payments WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
   if (!payment) return res.status(404).json({ error: 'Payment not found' });
   const now = new Date().toISOString();
   await run(`UPDATE fee_payments SET status = ?, cancelledAt = ?, cancelledBy = ?, cancelReason = ? WHERE id = ?`, ['Cancelled', now, req.user.username, req.body?.reason || 'Cancelled by admin', id]);
@@ -1485,13 +1979,14 @@ app.delete('/api/fee-payments/:id', authMiddleware, requireAnyRole(paymentRoles)
 
 app.get('/api/fees/reports', authMiddleware, requireAnyRole(feeRoles), async (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
-  const plans = await loadFeePlansWithPaid();
+  const plans = await loadFeePlansWithPaid(currentTenantId(req));
   const dailyRows = await all(
     `SELECT paymentDate, paymentMethod, COALESCE(SUM(amount), 0) AS amount
      FROM fee_payments
-     WHERE COALESCE(status, 'Active') != 'Cancelled'
+     WHERE COALESCE(status, 'Active') != 'Cancelled' AND tenant_id = ?
      GROUP BY paymentDate, paymentMethod
-     ORDER BY paymentDate DESC`
+     ORDER BY paymentDate DESC`,
+    [currentTenantId(req)]
   );
   const dailyCollection = Object.values(dailyRows.reduce((acc, row) => {
     const date = row.paymentDate || 'Unknown';
@@ -1590,16 +2085,19 @@ app.post('/api/fees/reminders', authMiddleware, requireAnyRole(paymentRoles), as
 });
 
 app.post('/api/automation/fees', authMiddleware, requireAnyRole(paymentRoles), async (req, res) => {
-  const { dryRun = false, sentVia = 'WhatsApp Automation' } = req.body || {};
+  const { dryRun = false, sendNow = true, sentVia = 'WhatsApp Automation' } = req.body || {};
   const today = new Date().toISOString().slice(0, 10);
   const now = new Date().toISOString();
-  const plans = await all(
-    `SELECT fee_plans.*, students.name AS studentName, students.data AS studentData
+  const planRows = await all(
+    `SELECT fee_plans.*, students.name AS studentName, students.data AS studentData,
+      COALESCE(SUM(fee_payments.amount), 0) AS paidAmount
      FROM fee_plans
      LEFT JOIN students ON students.id = fee_plans.student_id
-     WHERE fee_plans.dueAmount > 0
+     LEFT JOIN fee_payments ON fee_payments.fee_plan_id = fee_plans.id AND COALESCE(fee_payments.status, 'Active') != 'Cancelled'
+     GROUP BY fee_plans.id, students.name, students.data
      ORDER BY fee_plans.dueDate ASC, fee_plans.id DESC`
   );
+  const plans = (await attachFeeDetailsMany(planRows)).filter((plan) => Number(plan.dueAmount || 0) > 0);
   const queued = [];
   const skipped = [];
 
@@ -1626,18 +2124,29 @@ app.post('/api/automation/fees', authMiddleware, requireAnyRole(paymentRoles), a
           [plan.id, reminderType, today]
         );
 
+      const templateKey = reminderType === 'After Due Date' || reminderType === 'Final Reminder'
+        ? 'fee_overdue_reminder'
+        : 'fee_due_reminder';
+      const amount = Number(installment.amount || plan.dueAmount || 0);
       const row = {
         student_id: plan.student_id,
         fee_plan_id: plan.id,
         installment_id: installment.id || null,
         studentName: plan.studentName,
+        parentPhone: parentPhoneFromStudentData(plan.studentData),
         course: plan.courseProgram || plan.feeCategory,
         installmentLabel: installment.label || plan.installmentLabel || 'Fee Due',
-        amount: Number(installment.amount || plan.dueAmount || 0),
+        amount,
         dueDate,
         reminderType,
         sentVia,
-        message: buildReminderMessage(plan, installment),
+        message: await renderMessageTemplate(templateKey, {
+          studentName: plan.studentName,
+          amount: amount.toLocaleString('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }),
+          dueDate,
+          course: plan.courseProgram || plan.feeCategory,
+          installmentLabel: installment.label || plan.installmentLabel || 'Fee Due',
+        }, reminderMessage(plan, installment)),
       };
 
       if (duplicate) {
@@ -1646,12 +2155,20 @@ app.post('/api/automation/fees', authMiddleware, requireAnyRole(paymentRoles), a
       }
 
       if (!dryRun) {
+        const delivery = sendNow
+          ? await sendWhatsAppText(row.parentPhone, row.message)
+          : { ok: false, status: 'Queued', provider: 'manual', error: 'sendNow disabled' };
+        row.status = delivery.status;
+        row.provider = delivery.provider;
+        row.deliveryError = delivery.error || '';
         const result = await run(
           `INSERT INTO fee_reminders (student_id, fee_plan_id, installment_id, reminderType, sentVia, sentAt, status, message, createdAt)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [row.student_id, row.fee_plan_id, row.installment_id, row.reminderType, row.sentVia, now, 'Queued', row.message, now]
+          [row.student_id, row.fee_plan_id, row.installment_id, row.reminderType, row.sentVia, now, row.status, row.message, now]
         );
         row.id = result.lastID;
+      } else {
+        row.status = isWhatsAppConfigured() && row.parentPhone ? 'Ready' : row.parentPhone ? 'Queued' : 'Missing Phone';
       }
 
       queued.push(row);
@@ -1659,19 +2176,100 @@ app.post('/api/automation/fees', authMiddleware, requireAnyRole(paymentRoles), a
   }
 
   if (!dryRun && queued.length) {
-    await auditLog('fee_reminder', 0, 'automation_run', null, { count: queued.length, sentVia }, req.user.username);
+    await writeFeeAudit('fee_reminder', 0, 'automation_run', null, { count: queued.length, sentVia, sendNow }, req.user.username);
   }
+  const counts = queued.reduce((acc, row) => {
+    const key = String(row.status || 'Queued').replace(/\s+/g, '').toLowerCase();
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
 
   res.json({
     dryRun: Boolean(dryRun),
+    providerConfigured: isWhatsAppConfigured(),
     queued,
     skipped,
     summary: {
       queued: queued.length,
+      sent: counts.sent || 0,
+      failed: counts.failed || 0,
+      missingPhone: counts.missingphone || 0,
       skipped: skipped.length,
       checkedPlans: plans.length,
     },
   });
+});
+
+app.get('/api/whatsapp/status', authMiddleware, requireAnyRole(paymentRoles), async (req, res) => {
+  const config = whatsappConfig();
+  const recentFailures = await all(
+    `SELECT fee_reminders.*, students.name AS studentName, fee_plans.courseProgram
+     FROM fee_reminders
+     LEFT JOIN students ON students.id = fee_reminders.student_id
+     LEFT JOIN fee_plans ON fee_plans.id = fee_reminders.fee_plan_id
+     WHERE fee_reminders.status IN ('Failed', 'Missing Phone')
+     ORDER BY fee_reminders.sentAt DESC, fee_reminders.id DESC
+     LIMIT 10`
+  );
+  const recentQueued = await all(
+    `SELECT status, COUNT(*) AS count
+     FROM fee_reminders
+     WHERE sentAt >= ?
+     GROUP BY status`,
+    [new Date(Date.now() - 7 * 86400000).toISOString()]
+  );
+
+  res.json({
+    configured: isWhatsAppConfigured(),
+    provider: 'WhatsApp Cloud API',
+    apiVersion: config.apiVersion,
+    phoneNumberId: config.phoneNumberId ? `${config.phoneNumberId.slice(0, 4)}...${config.phoneNumberId.slice(-4)}` : '',
+    hasAccessToken: Boolean(config.accessToken),
+    last7Days: recentQueued.reduce((acc, row) => {
+      acc[row.status || 'Unknown'] = Number(row.count || 0);
+      return acc;
+    }, {}),
+    recentFailures,
+  });
+});
+
+app.post('/api/whatsapp/test', authMiddleware, requireAnyRole(paymentRoles), async (req, res) => {
+  const { phone, message } = req.body;
+  const validationError = requireFields(req.body, ['phone', 'message']);
+  if (validationError) return res.status(400).json({ error: validationError });
+  const result = await sendWhatsAppText(phone, message);
+  res.json({
+    configured: isWhatsAppConfigured(),
+    phone: normalizeIndianPhone(phone),
+    ...result,
+  });
+});
+
+function normalizeMessageTemplate(row) {
+  return {
+    ...row,
+    variables: row.variables ? JSON.parse(row.variables) : [],
+  };
+}
+
+app.get('/api/message-templates', authMiddleware, requireAnyRole(feeRoles), async (req, res) => {
+  const rows = await all(`SELECT * FROM message_templates ORDER BY displayName ASC, id ASC`);
+  res.json(rows.map(normalizeMessageTemplate));
+});
+
+app.put('/api/message-templates/:id', authMiddleware, requireAnyRole(paymentRoles), async (req, res) => {
+  const { id } = req.params;
+  const { displayName, channel = 'WhatsApp', body, variables = [], status = 'Active' } = req.body;
+  const validationError = requireFields(req.body, ['displayName', 'body']);
+  if (validationError) return res.status(400).json({ error: validationError });
+  const existing = await get(`SELECT * FROM message_templates WHERE id = ?`, [id]);
+  if (!existing) return res.status(404).json({ error: 'Message template not found' });
+  const now = new Date().toISOString();
+  await run(
+    `UPDATE message_templates SET displayName = ?, channel = ?, body = ?, variables = ?, status = ?, updatedBy = ?, updatedAt = ? WHERE id = ?`,
+    [displayName, channel, body, JSON.stringify(Array.isArray(variables) ? variables : []), status, req.user.username, now, id]
+  );
+  res.json(normalizeMessageTemplate(await get(`SELECT * FROM message_templates WHERE id = ?`, [id])));
 });
 
 app.get('/api/fees/audit-logs', authMiddleware, requireAnyRole(paymentRoles), async (req, res) => {
@@ -2435,11 +3033,13 @@ app.post('/api/parent-portal/lookup', async (req, res) => {
      LIMIT 20`,
     [student_id]
   );
+  const communication = await buildStudentCommunicationTimeline(student_id, { limit: 25 });
   res.json({
     student: { id: student.id, name: student.name, grade: student.grade, batch: student.batch },
     attendance: attendanceRows,
     fees: feePlans.map((plan) => ({ course: plan.courseProgram || plan.feeCategory, netAmount: plan.netAmount, paidAmount: plan.paidAmount, dueAmount: plan.dueAmount, feeStatus: plan.feeStatus, nextDueDate: plan.nextDueDate })),
     payments: payments.map((payment) => ({ ...payment, amount: Number(payment.amount || 0) })),
+    communication: communication.timeline,
   });
 });
 
@@ -3402,7 +4002,7 @@ app.delete('/api/test-performance/omr-uploads/:id', authMiddleware, requireRole(
 
 // Admissions CRUD
 app.get('/api/admissions', authMiddleware, async (req, res) => {
-  const rows = await all(`SELECT * FROM admissions ORDER BY id DESC`);
+  const rows = await all(`SELECT * FROM admissions WHERE tenant_id = ? ORDER BY id DESC`, [currentTenantId(req)]);
   res.json(rows.map((r) => ({ ...r, data: r.data ? JSON.parse(r.data) : null })));
 });
 
@@ -3410,7 +4010,7 @@ app.post('/api/admissions', authMiddleware, async (req, res) => {
   const { name, program, status, source, data } = req.body;
   const validationError = requireFields(req.body, ['name']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const result = await run(`INSERT INTO admissions (name, program, status, source, data) VALUES (?, ?, ?, ?, ?)`, [name, program, status, source, JSON.stringify(data || {})]);
+  const result = await run(`INSERT INTO admissions (tenant_id, name, program, status, source, data) VALUES (?, ?, ?, ?, ?, ?)`, [currentTenantId(req), name, program, status, source, JSON.stringify(data || {})]);
   res.json({ id: result.lastID });
 });
 
@@ -3419,15 +4019,15 @@ app.put('/api/admissions/:id', authMiddleware, async (req, res) => {
   const { name, program, status, source, data } = req.body;
   const validationError = requireFields(req.body, ['name']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const existing = await get(`SELECT * FROM admissions WHERE id = ?`, [id]);
+  const existing = await get(`SELECT * FROM admissions WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'Admission not found' });
-  await run(`UPDATE admissions SET name = ?, program = ?, status = ?, source = ?, data = ? WHERE id = ?`, [name, program, status, source, JSON.stringify(data || {}), id]);
+  await run(`UPDATE admissions SET name = ?, program = ?, status = ?, source = ?, data = ? WHERE id = ? AND tenant_id = ?`, [name, program, status, source, JSON.stringify(data || {}), id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 app.delete('/api/admissions/:id', authMiddleware, requireRole('admin'), async (req, res) => {
   const { id } = req.params;
-  await run(`DELETE FROM admissions WHERE id = ?`, [id]);
+  await run(`DELETE FROM admissions WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 

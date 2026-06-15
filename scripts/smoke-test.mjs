@@ -82,8 +82,11 @@ async function main() {
   });
   const token = login.token;
   if (!token) throw new Error('Login did not return a token');
+  if (!login.user?.tenant_id || !login.user?.tenantName) throw new Error('Login did not return tenant metadata');
 
   await request('/users', withAuth(token));
+  const currentTenant = await request('/tenant/current', withAuth(token));
+  if (!currentTenant.id || !currentTenant.name || !currentTenant.subscriptionPlan) throw new Error('Current tenant endpoint failed');
   const [accountantToken, counsellorToken, teacherRoleToken, basicUserToken] = await Promise.all([
     createRoleUser(token, 'accountant', suffix),
     createRoleUser(token, 'counsellor', suffix),
@@ -98,7 +101,7 @@ async function main() {
       role: 'user',
     }),
   }));
-  if (!createdUser.id || createdUser.role !== 'user') throw new Error('Admin user creation failed');
+  if (!createdUser.id || createdUser.role !== 'user' || Number(createdUser.tenant_id) !== Number(currentTenant.id)) throw new Error('Admin user creation failed');
 
   const teacher = await request('/teachers', withAuth(token, {
     method: 'POST',
@@ -234,6 +237,48 @@ async function main() {
   if (!history.id) throw new Error('Student history creation failed');
   const historyRows = await request(`/students/${student.id}/history`, withAuth(token));
   if (!historyRows.length) throw new Error('Student history load failed');
+
+  const followUp = await request('/follow-ups', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      student_id: student.id,
+      taskType: 'Parent Call Follow-up',
+      dueDate: '2026-06-05',
+      priority: 'High',
+      assignedTo: 'Smoke Counsellor',
+      notes: 'Smoke follow-up task',
+    }),
+  }));
+  if (!followUp.id || followUp.status !== 'Overdue') throw new Error('Follow-up task creation failed');
+  const followUps = await request(`/follow-ups?student_id=${student.id}`, withAuth(token));
+  if (!followUps.length) throw new Error('Follow-up task list failed');
+  const followUpEscalation = await request('/automation/follow-ups', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ minAgeDays: 1 }),
+  }));
+  if (!Array.isArray(followUpEscalation.candidates) || !followUpEscalation.candidates.some((row) => Number(row.id) === Number(followUp.id))) {
+    throw new Error('Follow-up escalation did not include overdue task');
+  }
+  if (Number(followUpEscalation.escalated || 0) < 1) throw new Error('Follow-up escalation did not mark any task escalated');
+  const duplicateFollowUpEscalation = await request('/automation/follow-ups', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ minAgeDays: 1 }),
+  }));
+  if (!duplicateFollowUpEscalation.alreadyEscalated?.some((row) => Number(row.id) === Number(followUp.id))) {
+    throw new Error('Follow-up escalation did not skip task already escalated today');
+  }
+  const completedFollowUp = await request(`/follow-ups/${followUp.id}/complete`, withAuth(token, {
+    method: 'PATCH',
+    body: JSON.stringify({ outcome: 'Parent call completed in smoke test' }),
+  }));
+  if (completedFollowUp.status !== 'Done' || completedFollowUp.completionOutcome !== 'Parent call completed in smoke test') throw new Error('Follow-up completion failed');
+  const followUpHistoryRows = await request(`/students/${student.id}/history`, withAuth(token));
+  if (!followUpHistoryRows.some((row) => row.type === 'Follow-up' && /Parent call completed in smoke test/.test(row.detail || ''))) {
+    throw new Error('Follow-up completion was not written to student history');
+  }
+  if (!followUpHistoryRows.some((row) => row.type === 'Follow-up Escalation' && /overdue/i.test(row.title || ''))) {
+    throw new Error('Follow-up escalation was not written to student history');
+  }
 
   const attendanceSession = await request('/attendance/sessions', withAuth(token, {
     method: 'POST',
@@ -966,7 +1011,7 @@ async function main() {
       parentPhone: '9999999999',
     }),
   });
-  if (!parentPortal.student || !parentPortal.attendance?.length || !parentPortal.fees?.length) {
+  if (!parentPortal.student || !parentPortal.attendance?.length || !parentPortal.fees?.length || !Array.isArray(parentPortal.communication)) {
     throw new Error('Parent portal lookup failed');
   }
 
@@ -984,6 +1029,7 @@ async function main() {
     expectAllowed('/fee-plans', accountantToken),
     expectAllowed('/expenses', accountantToken),
     expectAllowed('/fee-plans', counsellorToken),
+    expectAllowed('/follow-ups', counsellorToken),
     expectAllowed('/students', counsellorToken),
     expectAllowed('/admissions', counsellorToken),
     expectAllowed('/attendance/sessions', teacherRoleToken),
@@ -997,6 +1043,7 @@ async function main() {
     expectForbidden('/ontology/entities', accountantToken),
     expectForbidden(`/students/${student.id}`, accountantToken, { method: 'DELETE' }),
     expectForbidden('/expenses', counsellorToken),
+    expectForbidden('/automation/follow-ups', counsellorToken, { method: 'POST', body: JSON.stringify({ minAgeDays: 1 }) }),
     expectForbidden('/recurring-expenses', counsellorToken, {
       method: 'POST',
       body: JSON.stringify({
@@ -1056,6 +1103,7 @@ async function main() {
   await request(`/test-performance/results/${performanceResult.id}`, withAuth(token, { method: 'DELETE' }));
   await request(`/test-performance/tests/${performanceTest.id}`, withAuth(token, { method: 'DELETE' }));
   await request(`/attendance/sessions/${attendanceSession.id}`, withAuth(token, { method: 'DELETE' }));
+  await request(`/follow-ups/${followUp.id}`, withAuth(token, { method: 'DELETE' }));
   await request(`/student-history/${history.id}`, withAuth(token, { method: 'DELETE' }));
   await request(`/admissions/${admission.id}`, withAuth(token, { method: 'DELETE' }));
   await request(`/students/${student.id}`, withAuth(token, { method: 'DELETE' }));

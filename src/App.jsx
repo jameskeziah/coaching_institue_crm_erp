@@ -11,6 +11,7 @@ import Automation from './pages/Automation';
 import Dashboard from './pages/Dashboard';
 import Expenses from './pages/Expenses';
 import Fees from './pages/Fees';
+import FollowUps from './pages/FollowUps';
 import OntologyAdmin from './pages/Ontology';
 import ParentPortal from './pages/ParentPortal';
 import Reports from './pages/Reports';
@@ -39,6 +40,7 @@ function AppRoutes() {
         <Route path="/automation" element={<ModuleRoute moduleName="automation"><Automation /></ModuleRoute>} />
         <Route path="/ai-lab" element={<ModuleRoute moduleName="aiLab"><AiLab /></ModuleRoute>} />
         <Route path="/fees" element={<ModuleRoute moduleName="fees"><Fees /></ModuleRoute>} />
+        <Route path="/follow-ups" element={<ModuleRoute moduleName="followUps"><FollowUps /></ModuleRoute>} />
         <Route path="/expenses" element={<ModuleRoute moduleName="expenses"><Expenses /></ModuleRoute>} />
         <Route path="/reports" element={<ModuleRoute moduleName="reports"><Reports /></ModuleRoute>} />
         <Route path="/parent-portal" element={<ModuleRoute moduleName="parentPortal"><ParentPortal /></ModuleRoute>} />

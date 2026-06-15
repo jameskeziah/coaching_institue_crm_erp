@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { createStudent, createStudentHistory, deleteStudent, deleteStudentHistory, fetchFeePlans, fetchStudent360, fetchStudentFeePlans, fetchStudentHistory, fetchStudents, updateStudent } from '../api';
+import { completeFollowUp, createFollowUp, createStudent, createStudentHistory, deleteStudent, deleteStudentHistory, fetchFeePlans, fetchStudent360, fetchStudentFeePlans, fetchStudentHistory, fetchStudents, updateStudent } from '../api';
 import { useAuth } from '../AuthContext';
 import { PageShell } from '@/components/page-shell';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -26,6 +26,8 @@ const academicYears = ['2026-27', '2027-28', '2028-29'];
 const branches = ['Tembhurni', 'Kurduvadi', 'Future Branch'];
 const statuses = ['Enquiry', 'Admitted', 'Active', 'Inactive', 'Dropout', 'Completed'];
 const historyTypes = ['Test', 'Complaint', 'Parent Meeting', 'Attendance', 'Fee', 'Note'];
+const followUpTypes = ['Fee Payment Promise', 'Parent Call Follow-up', 'Attendance Risk', 'Test Result Remedial', 'Admission Follow-up', 'Complaint Resolution'];
+const followUpPriorities = ['Medium', 'High', 'Urgent', 'Low'];
 const profileTabs = ['Profile', 'Fees', 'Attendance', 'Academic', 'Communication'];
 
 function today() {
@@ -357,6 +359,32 @@ export default function Students() {
     }
   }
 
+  async function addFollowUpTask(payload) {
+    if (!selectedStudent) return;
+    setMessage('');
+    setError('');
+    try {
+      await createFollowUp({ ...payload, student_id: selectedStudent.id });
+      setMessage('Follow-up task created.');
+      await loadStudentDetails(selectedStudent.id);
+    } catch (err) {
+      setError(err.error || 'Could not create follow-up task');
+    }
+  }
+
+  async function completeStudentFollowUp(taskId) {
+    if (!selectedStudent) return;
+    setMessage('');
+    setError('');
+    try {
+      await completeFollowUp(taskId);
+      setMessage('Follow-up task completed.');
+      await loadStudentDetails(selectedStudent.id);
+    } catch (err) {
+      setError(err.error || 'Could not complete follow-up task');
+    }
+  }
+
   async function confirmDelete() {
     if (!deleteTarget) return;
     setMessage('');
@@ -606,6 +634,8 @@ export default function Students() {
                 addHistory={addHistory}
                 canDelete={canDelete}
                 setDeleteTarget={setDeleteTarget}
+                addFollowUpTask={addFollowUpTask}
+                completeStudentFollowUp={completeStudentFollowUp}
               />
             </TabsContent>
           </Tabs>
@@ -702,18 +732,42 @@ function AcademicTab({ student360 }) {
   );
 }
 
-function CommunicationTab({ student360, history, historyForm, setHistoryForm, addHistory, canDelete, setDeleteTarget }) {
+function CommunicationTab({ student360, history, historyForm, setHistoryForm, addHistory, canDelete, setDeleteTarget, addFollowUpTask, completeStudentFollowUp }) {
+  const [followUpForm, setFollowUpForm] = useState({
+    taskType: 'Parent Call Follow-up',
+    dueDate: today(),
+    priority: 'Medium',
+    assignedTo: '',
+    notes: '',
+  });
   const communication = student360?.communication || {};
-  const timeline = [
-    ...(communication.parentAlerts || []).map((item) => ({ ...item, type: 'Attendance Alert', date: item.sentAt, title: item.alertType, detail: item.message })),
-    ...(communication.parentCalls || []).map((item) => ({ ...item, type: 'Parent Call', date: item.calledAt, title: item.callOutcome, detail: item.notes })),
-    ...(communication.feeReminders || []).map((item) => ({ ...item, type: 'Fee Reminder', date: item.sentAt, title: item.reminderType, detail: item.message })),
-    ...history.map((item) => ({ ...item, date: item.eventDate, title: item.title, detail: item.detail })),
-  ].sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  const followUps = communication.followUps || [];
+  const openFollowUps = followUps.filter((task) => task.status !== 'Done');
+  const timeline = communication.timeline?.length
+    ? communication.timeline
+    : [
+      ...(communication.parentAlerts || []).map((item) => ({ ...item, type: 'Attendance Alert', date: item.sentAt, title: item.alertType, detail: item.message, channel: item.channel, status: item.status })),
+      ...(communication.parentCalls || []).map((item) => ({ ...item, type: 'Parent Call', date: item.calledAt, title: item.callOutcome, detail: item.notes, channel: 'Phone', status: item.callOutcome })),
+      ...(communication.feeReminders || []).map((item) => ({ ...item, type: 'Fee Reminder', date: item.sentAt, title: item.reminderType, detail: item.message, channel: item.sentVia, status: item.status })),
+      ...history.map((item) => ({ ...item, type: item.type, date: item.eventDate, title: item.title, detail: item.detail, channel: 'Internal', status: '' })),
+    ].sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+
+  async function submitFollowUp(e) {
+    e.preventDefault();
+    await addFollowUpTask(followUpForm);
+    setFollowUpForm({
+      taskType: 'Parent Call Follow-up',
+      dueDate: today(),
+      priority: 'Medium',
+      assignedTo: '',
+      notes: '',
+    });
+  }
 
   return (
     <div className="grid gap-5 xl:grid-cols-[420px_1fr]">
-      <div>
+      <div className="space-y-6">
+        <div>
         <h3 className="font-semibold">Add Communication / Note</h3>
         <form onSubmit={addHistory} className="mt-4 grid gap-3">
           <select value={historyForm.type} onChange={(e) => setHistoryForm({ ...historyForm, type: e.target.value })} className="rounded-md border px-3 py-2 text-sm">
@@ -724,20 +778,64 @@ function CommunicationTab({ student360, history, historyForm, setHistoryForm, ad
           <Textarea value={historyForm.detail} onChange={(e) => setHistoryForm({ ...historyForm, detail: e.target.value })} placeholder="Details" rows={3} />
           <Button>Add to Timeline</Button>
         </form>
+        </div>
+
+        <div className="rounded-xl border p-4">
+          <h3 className="font-semibold">Create Follow-up Task</h3>
+          <form onSubmit={submitFollowUp} className="mt-4 grid gap-3">
+            <select value={followUpForm.taskType} onChange={(e) => setFollowUpForm({ ...followUpForm, taskType: e.target.value })} className="rounded-md border px-3 py-2 text-sm">
+              {followUpTypes.map((type) => <option key={type}>{type}</option>)}
+            </select>
+            <Input type="date" value={followUpForm.dueDate} onChange={(e) => setFollowUpForm({ ...followUpForm, dueDate: e.target.value })} required />
+            <select value={followUpForm.priority} onChange={(e) => setFollowUpForm({ ...followUpForm, priority: e.target.value })} className="rounded-md border px-3 py-2 text-sm">
+              {followUpPriorities.map((priority) => <option key={priority}>{priority}</option>)}
+            </select>
+            <Input value={followUpForm.assignedTo} onChange={(e) => setFollowUpForm({ ...followUpForm, assignedTo: e.target.value })} placeholder="Assigned to" />
+            <Textarea value={followUpForm.notes} onChange={(e) => setFollowUpForm({ ...followUpForm, notes: e.target.value })} placeholder="Notes" rows={3} />
+            <Button>Create Follow-up</Button>
+          </form>
+        </div>
       </div>
       <div>
+        <h3 className="font-semibold">Open Follow-ups</h3>
+        <div className="mt-4 space-y-3">
+          {openFollowUps.map((task) => (
+            <div key={task.id} className="rounded-xl border border-slate-200 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="flex flex-wrap gap-2">
+                    <Badge variant={task.status === 'Overdue' ? 'destructive' : 'secondary'}>{task.status}</Badge>
+                    <Badge variant="outline">{task.priority || 'Medium'}</Badge>
+                    <Badge variant="outline">Due {task.dueDate || '-'}</Badge>
+                  </div>
+                  <p className="mt-2 font-semibold">{task.taskType}</p>
+                  <p className="mt-1 whitespace-pre-wrap text-sm text-slate-600">{task.notes || '-'}</p>
+                  <p className="mt-2 text-xs text-slate-500">Assigned to: {task.assignedTo || 'Staff'}</p>
+                </div>
+                <Button size="sm" variant="outline" onClick={() => completeStudentFollowUp(task.id)}>Done</Button>
+              </div>
+            </div>
+          ))}
+          {!openFollowUps.length ? <p className="text-sm text-slate-500">No open follow-up tasks.</p> : null}
+        </div>
+
         <h3 className="font-semibold">Communication Timeline</h3>
         <div className="mt-4 space-y-3">
           {timeline.map((entry, index) => (
-            <div key={`${entry.type}-${entry.id || index}`} className="rounded-xl border border-slate-200 p-3">
+            <div key={entry.id || `${entry.type}-${entry.sourceId || index}`} className="rounded-xl border border-slate-200 p-3">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <Badge variant="outline">{entry.type} - {entry.date || 'No date'}</Badge>
-                  <p className="mt-1 font-semibold">{entry.title}</p>
+                  <div className="flex flex-wrap gap-2">
+                    <Badge variant="outline">{entry.type} - {entry.date || 'No date'}</Badge>
+                    {entry.channel ? <Badge variant="secondary">{entry.channel}</Badge> : null}
+                    {entry.status ? <Badge variant={entry.status === 'Failed' || entry.status === 'Missing Phone' ? 'destructive' : 'outline'}>{entry.status}</Badge> : null}
+                  </div>
+                  <p className="mt-2 font-semibold">{entry.title}</p>
                   <p className="mt-1 whitespace-pre-wrap text-sm text-slate-600">{entry.detail}</p>
+                  <p className="mt-2 text-xs text-slate-500">Triggered by: {entry.triggeredBy || 'Staff'}</p>
                 </div>
-                {canDelete && entry.type && history.some((item) => item.id === entry.id) ? (
-                  <Button variant="destructive" size="sm" onClick={() => setDeleteTarget({ type: 'history', id: entry.id })}>Delete</Button>
+                {canDelete && String(entry.id || '').startsWith('history-') ? (
+                  <Button variant="destructive" size="sm" onClick={() => setDeleteTarget({ type: 'history', id: entry.sourceId })}>Delete</Button>
                 ) : null}
               </div>
             </div>

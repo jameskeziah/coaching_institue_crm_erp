@@ -13,6 +13,7 @@ export const moduleRoles = {
   students: ['owner', 'director', 'admin', 'counsellor', 'teacher'],
   admissions: ['owner', 'director', 'admin', 'counsellor'],
   fees: ['owner', 'director', 'admin', 'accountant', 'counsellor'],
+  followUps: ['owner', 'director', 'admin', 'accountant', 'counsellor', 'teacher'],
   expenses: ['owner', 'director', 'admin', 'accountant'],
   reports: ['owner', 'director', 'admin', 'accountant'],
   academic: ['owner', 'director', 'admin', 'teacher'],

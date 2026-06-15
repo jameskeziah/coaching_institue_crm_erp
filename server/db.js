@@ -34,6 +34,11 @@ function normalizePostgresRow(row) {
   const normalized = { ...row };
   const aliases = {
     displayname: 'displayName',
+    tenantid: 'tenant_id',
+    tenantname: 'tenantName',
+    subscriptionplan: 'subscriptionPlan',
+    subscriptionstatus: 'subscriptionStatus',
+    billingemail: 'billingEmail',
     updatedat: 'updatedAt',
     createdat: 'createdAt',
     teachername: 'teacherName',
@@ -85,6 +90,16 @@ function normalizePostgresRow(row) {
     openingcash: 'openingCash',
     closingcash: 'closingCash',
     studentname: 'studentName',
+    tasktype: 'taskType',
+    assignedto: 'assignedTo',
+    linkedtype: 'linkedType',
+    linkedid: 'linkedId',
+    createdby: 'createdBy',
+    completionoutcome: 'completionOutcome',
+    lastescalatedat: 'lastEscalatedAt',
+    escalationcount: 'escalationCount',
+    completedat: 'completedAt',
+    completedby: 'completedBy',
     feecategory: 'feeCategory',
     courseprogram: 'courseProgram',
     paymenttype: 'paymentType',
@@ -477,6 +492,9 @@ function normalizePostgresRow(row) {
     processedcount: 'processedCount',
     errorCount: 'errorCount',
     errorcount: 'errorCount',
+    templatekey: 'templateKey',
+    displayname: 'displayName',
+    updatedby: 'updatedBy',
   };
 
   Object.entries(aliases).forEach(([from, to]) => {
@@ -543,22 +561,40 @@ async function createTables() {
   const integerType = isPostgres ? 'INTEGER' : 'INTEGER';
 
   await run(
+    `CREATE TABLE IF NOT EXISTS tenants (
+      id ${idColumn},
+      name TEXT,
+      slug TEXT UNIQUE,
+      subscriptionPlan TEXT DEFAULT 'local',
+      subscriptionStatus TEXT DEFAULT 'active',
+      billingEmail TEXT,
+      status TEXT DEFAULT 'Active',
+      createdAt TEXT,
+      updatedAt TEXT
+    )`
+  );
+
+  await run(
     `CREATE TABLE IF NOT EXISTS users (
       id ${idColumn},
       username TEXT UNIQUE,
       password TEXT,
-      role TEXT
+      role TEXT,
+      tenant_id ${integerType},
+      FOREIGN KEY(tenant_id) REFERENCES tenants(id)
     )`
   );
 
   await run(
     `CREATE TABLE IF NOT EXISTS teachers (
       id ${idColumn},
+      tenant_id ${integerType},
       name TEXT,
       subject TEXT,
       month TEXT,
       data TEXT,
-      updatedAt TEXT
+      updatedAt TEXT,
+      FOREIGN KEY(tenant_id) REFERENCES tenants(id)
     )`
   );
 
@@ -615,6 +651,7 @@ async function createTables() {
   await run(
     `CREATE TABLE IF NOT EXISTS vendors (
       id ${idColumn},
+      tenant_id ${integerType},
       vendorName TEXT,
       vendorType TEXT,
       mobileNumber TEXT,
@@ -623,13 +660,15 @@ async function createTables() {
       bankDetails TEXT,
       notes TEXT,
       createdAt TEXT,
-      updatedAt TEXT
+      updatedAt TEXT,
+      FOREIGN KEY(tenant_id) REFERENCES tenants(id)
     )`
   );
 
   await run(
     `CREATE TABLE IF NOT EXISTS expenses (
       id ${idColumn},
+      tenant_id ${integerType},
       expenseId TEXT UNIQUE,
       date TEXT,
       branch TEXT,
@@ -657,6 +696,7 @@ async function createTables() {
       approvalRequired TEXT,
       createdAt TEXT,
       updatedAt TEXT,
+      FOREIGN KEY(tenant_id) REFERENCES tenants(id),
       FOREIGN KEY(vendor_id) REFERENCES vendors(id)
     )`
   );
@@ -664,6 +704,7 @@ async function createTables() {
   await run(
     `CREATE TABLE IF NOT EXISTS petty_cash_entries (
       id ${idColumn},
+      tenant_id ${integerType},
       date TEXT,
       branch TEXT,
       cashFlowType TEXT,
@@ -673,13 +714,15 @@ async function createTables() {
       referenceType TEXT,
       referenceId ${integerType},
       remarks TEXT,
-      createdAt TEXT
+      createdAt TEXT,
+      FOREIGN KEY(tenant_id) REFERENCES tenants(id)
     )`
   );
 
   await run(
     `CREATE TABLE IF NOT EXISTS recurring_expense_templates (
       id ${idColumn},
+      tenant_id ${integerType},
       templateName TEXT,
       branch TEXT,
       category TEXT,
@@ -702,7 +745,8 @@ async function createTables() {
       dayOfMonth ${integerType} DEFAULT 1,
       lastGeneratedMonth TEXT,
       createdAt TEXT,
-      updatedAt TEXT
+      updatedAt TEXT,
+      FOREIGN KEY(tenant_id) REFERENCES tenants(id)
     )`
   );
 
@@ -1313,11 +1357,13 @@ async function createTables() {
   await run(
     `CREATE TABLE IF NOT EXISTS students (
       id ${idColumn},
+      tenant_id ${integerType},
       name TEXT,
       grade TEXT,
       batch TEXT,
       attendance TEXT,
-      data TEXT
+      data TEXT,
+      FOREIGN KEY(tenant_id) REFERENCES tenants(id)
     )`
   );
 
@@ -1335,13 +1381,40 @@ async function createTables() {
   );
 
   await run(
+    `CREATE TABLE IF NOT EXISTS follow_up_tasks (
+      id ${idColumn},
+      student_id ${integerType},
+      studentName TEXT,
+      taskType TEXT,
+      dueDate TEXT,
+      priority TEXT DEFAULT 'Medium',
+      assignedTo TEXT,
+      status TEXT DEFAULT 'Open',
+      notes TEXT,
+      linkedType TEXT,
+      linkedId ${integerType},
+      createdBy TEXT,
+      completionOutcome TEXT,
+      lastEscalatedAt TEXT,
+      escalationCount INTEGER DEFAULT 0,
+      completedAt TEXT,
+      completedBy TEXT,
+      createdAt TEXT,
+      updatedAt TEXT,
+      FOREIGN KEY(student_id) REFERENCES students(id)
+    )`
+  );
+
+  await run(
     `CREATE TABLE IF NOT EXISTS admissions (
       id ${idColumn},
+      tenant_id ${integerType},
       name TEXT,
       program TEXT,
       status TEXT,
       source TEXT,
-      data TEXT
+      data TEXT,
+      FOREIGN KEY(tenant_id) REFERENCES tenants(id)
     )`
   );
 
@@ -1364,6 +1437,7 @@ async function createTables() {
   await run(
     `CREATE TABLE IF NOT EXISTS fee_plans (
       id ${idColumn},
+      tenant_id ${integerType},
       student_id ${integerType},
       courseProgram TEXT,
       feeCategory TEXT,
@@ -1382,6 +1456,7 @@ async function createTables() {
       notes TEXT,
       createdAt TEXT,
       updatedAt TEXT,
+      FOREIGN KEY(tenant_id) REFERENCES tenants(id),
       FOREIGN KEY(student_id) REFERENCES students(id)
     )`
   );
@@ -1411,6 +1486,7 @@ async function createTables() {
   await run(
     `CREATE TABLE IF NOT EXISTS fee_payments (
       id ${idColumn},
+      tenant_id ${integerType},
       fee_plan_id ${integerType},
       student_id ${integerType},
       amount REAL,
@@ -1426,6 +1502,7 @@ async function createTables() {
       cancelledBy TEXT,
       cancelReason TEXT,
       createdAt TEXT,
+      FOREIGN KEY(tenant_id) REFERENCES tenants(id),
       FOREIGN KEY(fee_plan_id) REFERENCES fee_plans(id),
       FOREIGN KEY(student_id) REFERENCES students(id)
     )`
@@ -1471,6 +1548,21 @@ async function createTables() {
       newValue TEXT,
       changedBy TEXT,
       createdAt TEXT
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS message_templates (
+      id ${idColumn},
+      templateKey TEXT UNIQUE,
+      displayName TEXT,
+      channel TEXT DEFAULT 'WhatsApp',
+      body TEXT,
+      variables TEXT,
+      status TEXT DEFAULT 'Active',
+      updatedBy TEXT,
+      createdAt TEXT,
+      updatedAt TEXT
     )`
   );
 
@@ -1722,15 +1814,67 @@ async function migrateAttendanceColumns() {
   await addColumnIfMissing('attendance_records', 'markedAt', 'TEXT');
 }
 
+async function migrateFollowUpColumns() {
+  await addColumnIfMissing('follow_up_tasks', 'completionOutcome', 'TEXT');
+  await addColumnIfMissing('follow_up_tasks', 'lastEscalatedAt', 'TEXT');
+  await addColumnIfMissing('follow_up_tasks', 'escalationCount', 'INTEGER DEFAULT 0');
+}
+
+async function ensureDefaultTenant() {
+  const now = new Date().toISOString();
+  let tenant = await get(`SELECT * FROM tenants WHERE slug = ?`, ['miraku']);
+  if (!tenant) {
+    const result = await run(
+      `INSERT INTO tenants (name, slug, subscriptionPlan, subscriptionStatus, billingEmail, status, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ['Miraku Education Foundation', 'miraku', 'local', 'active', process.env.ADMIN_EMAIL || '', 'Active', now, now]
+    );
+    tenant = await get(`SELECT * FROM tenants WHERE id = ?`, [result.lastID]);
+  }
+  return tenant;
+}
+
+async function migrateTenantColumns() {
+  await addColumnIfMissing('users', 'tenant_id', 'INTEGER');
+  const tenant = await ensureDefaultTenant();
+  if (tenant?.id) {
+    await run(`UPDATE users SET tenant_id = ? WHERE tenant_id IS NULL`, [tenant.id]);
+  }
+}
+
+async function migrateOperationalTenantColumns() {
+  const tenant = await ensureDefaultTenant();
+  const tables = [
+    'teachers',
+    'students',
+    'admissions',
+    'fee_plans',
+    'fee_payments',
+    'vendors',
+    'expenses',
+    'petty_cash_entries',
+    'recurring_expense_templates',
+  ];
+  for (const table of tables) {
+    await addColumnIfMissing(table, 'tenant_id', 'INTEGER');
+    if (tenant?.id) {
+      await run(`UPDATE ${table} SET tenant_id = ? WHERE tenant_id IS NULL`, [tenant.id]);
+    }
+  }
+}
+
 async function seedAdmin() {
   const adminUsername = process.env.ADMIN_USERNAME;
   const adminPassword = process.env.ADMIN_PASSWORD;
   if (!adminUsername || !adminPassword) return;
 
+  const tenant = await ensureDefaultTenant();
   const admin = await get(`SELECT * FROM users WHERE username = ?`, [adminUsername]);
   if (!admin) {
     const hashed = await bcrypt.hash(adminPassword, 10);
-    await run(`INSERT INTO users (username, password, role) VALUES (?, ?, ?)`, [adminUsername, hashed, 'admin']);
+    await run(`INSERT INTO users (username, password, role, tenant_id) VALUES (?, ?, ?, ?)`, [adminUsername, hashed, 'admin', tenant?.id || null]);
+  } else if (!admin.tenant_id && tenant?.id) {
+    await run(`UPDATE users SET tenant_id = ? WHERE id = ?`, [tenant.id, admin.id]);
   }
 }
 
@@ -1786,13 +1930,66 @@ async function seedOntology() {
   ], now);
 }
 
+async function ensureMessageTemplate(templateKey, displayName, body, variables, now) {
+  const existing = await get(`SELECT * FROM message_templates WHERE templateKey = ?`, [templateKey]);
+  if (existing) return;
+  await run(
+    `INSERT INTO message_templates (templateKey, displayName, channel, body, variables, status, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [templateKey, displayName, 'WhatsApp', body, JSON.stringify(variables || []), 'Active', now, now]
+  );
+}
+
+async function seedMessageTemplates() {
+  const now = new Date().toISOString();
+  await ensureMessageTemplate(
+    'fee_due_reminder',
+    'Fee Due Reminder',
+    'Dear Parent,\nThis is a reminder that {{amount}} fee installment for {{studentName}} is due on {{dueDate}}.\nKindly pay before the due date.\nProTrack Kaizen, Miraku Education Foundation.',
+    ['studentName', 'amount', 'dueDate', 'course', 'installmentLabel'],
+    now
+  );
+  await ensureMessageTemplate(
+    'fee_overdue_reminder',
+    'Fee Overdue Reminder',
+    'Dear Parent,\nThe fee installment of {{amount}} for {{studentName}} was due on {{dueDate}} and is still pending.\nPlease clear it at the earliest or contact the office.\nProTrack Kaizen, Miraku Education Foundation.',
+    ['studentName', 'amount', 'dueDate', 'course', 'installmentLabel'],
+    now
+  );
+  await ensureMessageTemplate(
+    'payment_receipt',
+    'Payment Receipt Message',
+    'Dear Parent,\nWe received {{amount}} for {{studentName}} on {{paymentDate}}. Receipt No: {{receiptNumber}}.\nThank you.\nProTrack Kaizen, Miraku Education Foundation.',
+    ['studentName', 'amount', 'paymentDate', 'receiptNumber', 'course'],
+    now
+  );
+  await ensureMessageTemplate(
+    'attendance_absent',
+    'Attendance Absent Alert',
+    'Dear Parent,\nYour child {{studentName}} was absent for {{subject}} lecture of {{batch}} batch on {{date}}.\nPlease contact the office if there is any reason.\nProTrack Kaizen.',
+    ['studentName', 'subject', 'batch', 'date'],
+    now
+  );
+  await ensureMessageTemplate(
+    'test_result_parent',
+    'Test Result Parent Message',
+    'Dear Parent,\n{{studentName}} scored {{marksObtained}}/{{totalMarks}} in {{testName}}. Required action: {{requiredAction}}.\nProTrack Kaizen.',
+    ['studentName', 'marksObtained', 'totalMarks', 'testName', 'requiredAction'],
+    now
+  );
+}
+
 async function migrate() {
   await createTables();
   await migrateFeeColumns();
   await migrateExpenseColumns();
   await migrateAttendanceColumns();
+  await migrateFollowUpColumns();
+  await migrateTenantColumns();
+  await migrateOperationalTenantColumns();
   await seedAdmin();
   await seedOntology();
+  await seedMessageTemplates();
 }
 
 async function close() {

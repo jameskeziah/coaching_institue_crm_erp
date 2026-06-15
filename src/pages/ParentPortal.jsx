@@ -90,6 +90,24 @@ export default function ParentPortal() {
               {!portal.payments.length ? <p className="text-slate-500">No payment receipts yet.</p> : null}
             </div>
           </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <h3 className="font-semibold">Communication History</h3>
+            <div className="mt-4 space-y-2 text-sm">
+              {(portal.communication || []).slice(0, 12).map((entry) => (
+                <div key={entry.id} className="rounded-lg bg-slate-50 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <strong>{entry.type}</strong>
+                    <span className="rounded-full bg-white px-2 py-0.5 text-xs text-slate-600">{entry.channel || '-'}</span>
+                    {entry.status ? <span className="rounded-full bg-white px-2 py-0.5 text-xs text-slate-600">{entry.status}</span> : null}
+                  </div>
+                  <p className="mt-1 text-slate-600">{entry.title} - {entry.date || '-'}</p>
+                  {entry.detail ? <p className="mt-1 whitespace-pre-wrap text-slate-500">{entry.detail}</p> : null}
+                </div>
+              ))}
+              {!portal.communication?.length ? <p className="text-slate-500">No communication records yet.</p> : null}
+            </div>
+          </div>
         </div>
       ) : null}
     </div>

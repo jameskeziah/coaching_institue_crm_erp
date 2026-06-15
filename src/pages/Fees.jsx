@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Bell, CalendarClock, Copy, CreditCard, FileText, MessageCircle, Pencil, PhoneCall, Plus, Save, Trash2, X } from 'lucide-react';
 import {
+  createFollowUp,
   createFeePayment,
   createFeePlan,
   deleteFeePayment,
@@ -11,9 +12,13 @@ import {
   fetchFeeReminders,
   fetchFeeReports,
   fetchFeeStructures,
+  fetchMessageTemplates,
   fetchStudents,
+  fetchWhatsAppStatus,
   markFeeReminderSent,
   runFeeReminderAutomation,
+  sendWhatsAppTest,
+  updateMessageTemplate,
   updateFeePlan,
 } from '../api';
 import { useAuth } from '../AuthContext';
@@ -155,17 +160,29 @@ export default function Fees() {
   const [promiseDates, setPromiseDates] = useState({});
   const [automationRunning, setAutomationRunning] = useState(false);
   const [automationResult, setAutomationResult] = useState(null);
+  const [whatsappStatus, setWhatsappStatus] = useState(null);
+  const [testMessage, setTestMessage] = useState({
+    phone: '',
+    message: 'Test WhatsApp message from ProTrack Kaizen fee reminder system.',
+  });
+  const [testSending, setTestSending] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+  const [messageTemplates, setMessageTemplates] = useState([]);
+  const [editingTemplateId, setEditingTemplateId] = useState(null);
+  const [templateDraft, setTemplateDraft] = useState({});
 
   async function load() {
     setError('');
     try {
-      const [studentRows, planRows, paymentRows, reportRows, reminderRows, auditRows] = await Promise.all([
+      const [studentRows, planRows, paymentRows, reportRows, reminderRows, auditRows, whatsappRows, templateRows] = await Promise.all([
         fetchStudents(),
         fetchFeePlans(),
         fetchFeePayments(),
         fetchFeeReports(),
         fetchFeeReminders(),
         fetchFeeAuditLogs(),
+        fetchWhatsAppStatus().catch(() => null),
+        fetchMessageTemplates().catch(() => []),
       ]);
       const structureRows = await fetchFeeStructures().catch(() => []);
       setStudents(studentRows);
@@ -175,6 +192,8 @@ export default function Fees() {
       setReports(reportRows);
       setReminders(reminderRows);
       setAuditLogs(auditRows);
+      setWhatsappStatus(whatsappRows);
+      setMessageTemplates(templateRows);
       const nextPlan = planRows.find((plan) => String(plan.id) === String(selectedPlanId)) || planRows[0];
       if (nextPlan) {
         setSelectedPlanId(String(nextPlan.id));
@@ -433,6 +452,19 @@ export default function Fees() {
         sentVia,
         message: `${item.message}${promiseDate ? `\nPromise-to-pay date: ${promiseDate}` : ''}${note ? `\nNote: ${note}` : ''}`,
       });
+      if (promiseDate) {
+        await createFollowUp({
+          student_id: item.studentId,
+          taskType: 'Fee Payment Promise',
+          dueDate: promiseDate,
+          priority: item.riskType === 'Overdue' ? 'High' : 'Medium',
+          assignedTo: 'Accounts',
+          status: 'Open',
+          notes: note || `Follow up for ${money(item.amount)} ${item.installmentLabel || 'installment'}.`,
+          linkedType: 'fee_plan',
+          linkedId: item.feePlanId,
+        });
+      }
       setFollowUpNotes((current) => ({ ...current, [item.feePlanId]: '' }));
       setPromiseDates((current) => ({ ...current, [item.feePlanId]: '' }));
       setMessage(`${sentVia} follow-up logged for ${item.studentName}.`);
@@ -454,12 +486,57 @@ export default function Fees() {
     try {
       const result = await runFeeReminderAutomation({ sentVia: 'WhatsApp Automation' });
       setAutomationResult(result);
-      setMessage(`Fee reminder automation queued ${result.summary?.queued || 0} reminder(s).`);
+      const providerText = result.providerConfigured ? 'WhatsApp sent/attempted' : 'WhatsApp not configured; reminders queued';
+      setMessage(`Fee reminder automation processed ${result.summary?.queued || 0} reminder(s). ${providerText}.`);
       await load();
     } catch (err) {
       setError(err.error || 'Could not run fee reminder automation');
     } finally {
       setAutomationRunning(false);
+    }
+  }
+
+  async function handleSendTestMessage(e) {
+    e.preventDefault();
+    setMessage('');
+    setError('');
+    setTestSending(true);
+    try {
+      const result = await sendWhatsAppTest(testMessage);
+      setTestResult(result);
+      setMessage(result.ok ? 'WhatsApp test message sent.' : `WhatsApp test result: ${result.status}.`);
+      const status = await fetchWhatsAppStatus().catch(() => null);
+      setWhatsappStatus(status);
+    } catch (err) {
+      setError(err.error || 'Could not send WhatsApp test message');
+    } finally {
+      setTestSending(false);
+    }
+  }
+
+  function startEditTemplate(template) {
+    setEditingTemplateId(template.id);
+    setTemplateDraft({
+      displayName: template.displayName || '',
+      channel: template.channel || 'WhatsApp',
+      status: template.status || 'Active',
+      body: template.body || '',
+      variables: template.variables || [],
+    });
+  }
+
+  async function handleSaveTemplate(templateId) {
+    setMessage('');
+    setError('');
+    try {
+      const saved = await updateMessageTemplate(templateId, templateDraft);
+      setMessage(`Template saved: ${saved.displayName}.`);
+      setEditingTemplateId(null);
+      setTemplateDraft({});
+      const rows = await fetchMessageTemplates();
+      setMessageTemplates(rows);
+    } catch (err) {
+      setError(err.error || 'Could not save message template');
     }
   }
 
@@ -616,6 +693,7 @@ export default function Fees() {
           <TabsTrigger value="records">Student Profiles</TabsTrigger>
           <TabsTrigger value="payments">Payments</TabsTrigger>
           <TabsTrigger value="reports">Reports</TabsTrigger>
+          <TabsTrigger value="templates">Templates</TabsTrigger>
           <TabsTrigger value="audit">Audit</TabsTrigger>
         </TabsList>
 
@@ -992,7 +1070,8 @@ export default function Fees() {
           {automationResult ? (
             <Alert className="mt-4">
               <AlertDescription>
-                Queued {automationResult.summary?.queued || 0} reminder(s), skipped {automationResult.summary?.skipped || 0}, checked {automationResult.summary?.checkedPlans || 0} fee plan(s).
+                {automationResult.providerConfigured ? 'WhatsApp provider configured.' : 'WhatsApp provider not configured; reminders are queued for manual sending.'}
+                {' '}Processed {automationResult.summary?.queued || 0}, sent {automationResult.summary?.sent || 0}, failed {automationResult.summary?.failed || 0}, missing phone {automationResult.summary?.missingPhone || 0}, skipped {automationResult.summary?.skipped || 0}, checked {automationResult.summary?.checkedPlans || 0} fee plan(s).
               </AlertDescription>
             </Alert>
           ) : null}
@@ -1010,6 +1089,78 @@ export default function Fees() {
               </div>
             ))}
             {!reminders.length ? <p className="text-sm text-slate-500">No reminders due today based on 3-day, due-date, 3-day-after, or final reminder rules.</p> : null}
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <h3 className="font-semibold">WhatsApp Settings</h3>
+              <p className="mt-1 text-sm text-slate-500">Cloud API status, recent failures, and a test-message check.</p>
+            </div>
+            <Badge variant={whatsappStatus?.configured ? 'secondary' : 'destructive'}>
+              {whatsappStatus?.configured ? 'Configured' : 'Not configured'}
+            </Badge>
+          </div>
+
+          <div className="mt-4 grid gap-3 text-sm md:grid-cols-2">
+            <div className="rounded-xl border border-slate-200 p-3">
+              <p className="text-slate-500">Provider</p>
+              <p className="font-semibold">{whatsappStatus?.provider || 'WhatsApp Cloud API'}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 p-3">
+              <p className="text-slate-500">Phone Number ID</p>
+              <p className="font-semibold">{whatsappStatus?.phoneNumberId || 'Missing'}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 p-3">
+              <p className="text-slate-500">Access Token</p>
+              <p className="font-semibold">{whatsappStatus?.hasAccessToken ? 'Present' : 'Missing'}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 p-3">
+              <p className="text-slate-500">Last 7 Days</p>
+              <p className="font-semibold">
+                Sent {whatsappStatus?.last7Days?.Sent || 0}, Failed {whatsappStatus?.last7Days?.Failed || 0}, Queued {whatsappStatus?.last7Days?.Queued || 0}
+              </p>
+            </div>
+          </div>
+
+          <form onSubmit={handleSendTestMessage} className="mt-4 space-y-3">
+            <Input
+              value={testMessage.phone}
+              onChange={(e) => setTestMessage({ ...testMessage, phone: e.target.value })}
+              placeholder="Test phone number, e.g. 919876543210"
+              required
+            />
+            <Textarea
+              value={testMessage.message}
+              onChange={(e) => setTestMessage({ ...testMessage, message: e.target.value })}
+              rows={3}
+              required
+            />
+            <Button type="submit" disabled={!canEditFinance || testSending}>
+              <MessageCircle className="mr-2 h-4 w-4" />
+              {testSending ? 'Sending...' : 'Send Test'}
+            </Button>
+          </form>
+
+          {testResult ? (
+            <Alert className="mt-4">
+              <AlertDescription>
+                Test status: {testResult.status || 'Unknown'}
+                {testResult.error ? ` - ${testResult.error}` : ''}
+              </AlertDescription>
+            </Alert>
+          ) : null}
+
+          <div className="mt-4 space-y-2">
+            <p className="text-sm font-semibold">Recent Failures</p>
+            {(whatsappStatus?.recentFailures || []).slice(0, 4).map((item) => (
+              <div key={item.id} className="rounded-lg bg-slate-50 p-3 text-sm">
+                <p className="font-semibold">{item.studentName || 'Student'} - {item.status}</p>
+                <p className="text-slate-500">{item.courseProgram || 'Fee reminder'} - {item.sentAt || '-'}</p>
+              </div>
+            ))}
+            {!whatsappStatus?.recentFailures?.length ? <p className="text-sm text-slate-500">No recent WhatsApp failures.</p> : null}
           </div>
         </div>
 
@@ -1079,6 +1230,84 @@ export default function Fees() {
           </div>
         </div>
       </div>
+
+        </TabsContent>
+
+        <TabsContent value="templates" className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Message Templates</CardTitle>
+          <CardDescription>Edit WhatsApp message wording used by fee reminders, receipts, attendance alerts, and test-result parent updates.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {messageTemplates.map((template) => {
+            const editing = editingTemplateId === template.id;
+            const draft = editing ? templateDraft : template;
+            return (
+              <div key={template.id} className="rounded-xl border border-slate-200 p-4">
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                  <div>
+                    <p className="font-semibold">{template.displayName}</p>
+                    <p className="mt-1 text-sm text-slate-500">{template.templateKey} - {template.channel} - {template.status}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    {editing ? (
+                      <>
+                        <Button type="button" size="sm" onClick={() => handleSaveTemplate(template.id)} disabled={!canEditFinance}>
+                          <Save className="mr-2 h-4 w-4" /> Save
+                        </Button>
+                        <Button type="button" size="sm" variant="outline" onClick={() => { setEditingTemplateId(null); setTemplateDraft({}); }}>
+                          Cancel
+                        </Button>
+                      </>
+                    ) : (
+                      <Button type="button" size="sm" variant="outline" onClick={() => startEditTemplate(template)} disabled={!canEditFinance}>
+                        <Pencil className="mr-2 h-4 w-4" /> Edit
+                      </Button>
+                    )}
+                  </div>
+                </div>
+
+                {editing ? (
+                  <div className="mt-4 space-y-3">
+                    <Input
+                      value={draft.displayName}
+                      onChange={(e) => setTemplateDraft({ ...templateDraft, displayName: e.target.value })}
+                      placeholder="Template name"
+                    />
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <select value={draft.channel} onChange={(e) => setTemplateDraft({ ...templateDraft, channel: e.target.value })} className="rounded-md border px-3 py-2 text-sm">
+                        <option>WhatsApp</option>
+                        <option>SMS</option>
+                        <option>Email</option>
+                      </select>
+                      <select value={draft.status} onChange={(e) => setTemplateDraft({ ...templateDraft, status: e.target.value })} className="rounded-md border px-3 py-2 text-sm">
+                        <option>Active</option>
+                        <option>Inactive</option>
+                      </select>
+                    </div>
+                    <Textarea
+                      value={draft.body}
+                      onChange={(e) => setTemplateDraft({ ...templateDraft, body: e.target.value })}
+                      rows={6}
+                      placeholder="Message body"
+                    />
+                  </div>
+                ) : (
+                  <pre className="mt-4 whitespace-pre-wrap rounded-lg bg-slate-50 p-3 text-sm text-slate-700">{template.body}</pre>
+                )}
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {(template.variables || []).map((variable) => (
+                    <Badge key={variable} variant="outline">{`{{${variable}}}`}</Badge>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+          {!messageTemplates.length ? <p className="text-sm text-muted-foreground">No message templates found. Restart the backend to run migrations and seed defaults.</p> : null}
+        </CardContent>
+      </Card>
 
         </TabsContent>
 
