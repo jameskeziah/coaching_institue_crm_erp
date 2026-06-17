@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Teacher Performance Scorecard
 
 Vite + React + Tailwind frontend with an Express + SQLite API for institute CRM workflows and teacher performance scorecards.
@@ -32,6 +31,7 @@ Vite + React + Tailwind frontend with an Express + SQLite API for institute CRM 
    ```
 
    `JWT_SECRET` is required. `ADMIN_USERNAME` and `ADMIN_PASSWORD` are only used to seed a first admin if that user does not already exist.
+
    Leave `DATABASE_URL` empty for local SQLite. Set it to a Postgres connection string for multi-user deployments.
 
 4. In PowerShell, load the environment before starting the backend:
@@ -52,11 +52,11 @@ Vite + React + Tailwind frontend with an Express + SQLite API for institute CRM 
 
 ## Commands
 
-- `npm run dev` - start the Vite frontend
-- `npm run build` - build production frontend assets
-- `npm run preview` - preview production frontend build
-- `npm run start:server` - start the Express API
-- `npm run test:smoke` - run API smoke tests against a running backend
+* `npm run dev` - start the Vite frontend
+* `npm run build` - build production frontend assets
+* `npm run preview` - preview production frontend build
+* `npm run start:server` - start the Express API
+* `npm run test:smoke` - run API smoke tests against a running backend
 
 ## Smoke Tests
 
@@ -75,8 +75,8 @@ The smoke test covers login, teacher CRUD, teacher review save/load, dashboard s
 
 The backend supports two database modes:
 
-- **SQLite fallback:** default local mode when `DATABASE_URL` is empty. The database file is `server/data.sqlite` and is ignored by Git.
-- **Postgres:** production/staging mode when `DATABASE_URL` is set, for example:
+* **SQLite fallback:** default local mode when `DATABASE_URL` is empty. The database file is `server/data.sqlite` and is ignored by Git.
+* **Postgres:** production/staging mode when `DATABASE_URL` is set, for example:
 
   ```text
   DATABASE_URL=postgresql://username:password@localhost:5432/teacher_scorecard
@@ -86,6 +86,3 @@ The backend supports two database modes:
   Use `DATABASE_SSL=true` for hosted Postgres providers that require SSL.
 
 SQLite is fine for local/single-user use. Use Postgres before deploying this as a shared multi-user system.
-=======
-# coaching_institue_crm_erp
->>>>>>> 05bc57528d87603b29599b3164a87e7fd7192db9
