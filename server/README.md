@@ -1,4 +1,4 @@
-Simple Node/Express backend with SQLite for the Teacher Performance Scorecard demo.
+Simple Node/Express backend with SQLite for the ProTrack Institute OS backend.
 
 Start:
 
@@ -9,3 +9,4 @@ npm run start
 ```
 
 Default admin user: `admin` / `password` (development only).
+

@@ -384,7 +384,7 @@ export default function TeacherPerformance() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'teacher-performance-scorecard.json';
+    link.download = 'protrack-teacher-performance.json';
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -435,7 +435,7 @@ export default function TeacherPerformance() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'teacher-performance-scorecard.csv';
+    link.download = 'protrack-teacher-performance.csv';
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -881,3 +881,4 @@ export default function TeacherPerformance() {
     </div>
   );
 }
+

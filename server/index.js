@@ -39,7 +39,7 @@ app.use(bodyParser.json());
 app.get('/api', (req, res) => {
   res.json({
     ok: true,
-    service: 'Teacher Performance Scorecard API',
+    service: 'ProTrack Institute OS API',
     endpoints: [
       '/api/auth/login',
       '/api/auth/register',
@@ -4179,3 +4179,4 @@ const PORT = process.env.PORT || 4000;
     console.log(`Server listening on http://localhost:${PORT}`);
   });
 })();
+
