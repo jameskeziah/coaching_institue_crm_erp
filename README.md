@@ -1,6 +1,6 @@
-# Teacher Performance Scorecard
+# ProTrack Institute OS
 
-Vite + React + Tailwind frontend with an Express + SQLite API for institute CRM workflows and teacher performance scorecards.
+Vite + React + Tailwind frontend with an Express + SQLite API for institute CRM/ERP workflows, admissions, counselling, teacher performance, reports, and operations.
 
 ## Setup
 

@@ -1,5 +1,6 @@
 {
-  "name": "teacher-performance-scorecard",
+  "name": "protrack-institute-os",
+  "description": "Institute CRM/ERP for admissions, counselling, teacher performance, reports, and operations.",
   "private": true,
   "version": "0.0.0",
   "type": "module",
