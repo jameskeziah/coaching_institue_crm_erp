@@ -144,7 +144,9 @@ router.post('/login', async (req, res) => {
     );
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
     if (user.is_active === 0) return res.status(403).json({ error: 'User is inactive' });
-    if (user.tenantStatus && user.tenantStatus !== 'Active') return res.status(403).json({ error: 'Tenant is inactive' });
+    if (user.tenantStatus && !['active', 'trialing'].includes(String(user.tenantStatus).toLowerCase())) {
+      return res.status(403).json({ error: 'Tenant is inactive' });
+    }
 
     const match = await verifyPassword(password, userPasswordHash(user));
     if (!match) return res.status(401).json({ error: 'Invalid credentials' });

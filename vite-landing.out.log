@@ -1,0 +1,29 @@
+
+> protrack-institute-os@0.0.0 dev
+> vite --host 127.0.0.1 --port 5173
+
+
+  [32m[1mVITE[22m v5.4.21[39m  [2mready in [0m[1m321[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://127.0.0.1:[1m5173[22m/[39m
+[2m6:34:06 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/LandingPage.jsx, /src/index.css[22m
+[2m6:34:07 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/LandingPage.jsx, /src/index.css[22m
+[2m7:04:36 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/index.css, /src/pages/Admissions.jsx, /src/pages/super-admin/AuditLogsPage.jsx, /src/pages/super-admin/SuperAdminLayout.jsx, /src/pages/ParentPortal.jsx, /src/pages/super-admin/InstitutesPage.jsx, /src/pages/super-admin/RevenuePage.jsx, /src/pages/super-admin/OverviewPage.jsx, /src/pages/super-admin/UsagePage.jsx, /src/pages/Reports.jsx, /src/pages/Dashboard.jsx, /src/pages/Teachers.jsx, /src/pages/Automation.jsx, /src/pages/FollowUps.jsx, /src/pages/Ontology.jsx, /src/AuthContext.jsx, /src/pages/super-admin/SupportAccessPage.jsx, /src/pages/Expenses.jsx, /src/pages/TestPerformance.jsx, /src/pages/Academic.jsx, /src/pages/AiLab.jsx, /src/pages/Attendance.jsx, /src/pages/TeacherPerformance.jsx, /src/pages/Students.jsx, /src/pages/Fees.jsx, /src/components/AuthBar.jsx, /src/pages/LandingPage.jsx[22m
+[2m7:04:37 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Dashboard.jsx, /src/index.css[22m
+[2m7:06:51 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Admissions.jsx, /src/index.css[22m
+[2m7:06:52 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Admissions.jsx, /src/index.css[22m
+[2m7:07:04 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Admissions.jsx, /src/index.css[22m
+[2m7:32:50 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/index.css, /src/pages/super-admin/AuditLogsPage.jsx, /src/pages/super-admin/SuperAdminLayout.jsx, /src/pages/ParentPortal.jsx, /src/pages/super-admin/InstitutesPage.jsx, /src/pages/super-admin/RevenuePage.jsx, /src/pages/super-admin/OverviewPage.jsx, /src/pages/super-admin/UsagePage.jsx, /src/pages/Reports.jsx, /src/pages/Dashboard.jsx, /src/pages/Teachers.jsx, /src/pages/Automation.jsx, /src/pages/FollowUps.jsx, /src/pages/Ontology.jsx, /src/AuthContext.jsx, /src/pages/super-admin/SupportAccessPage.jsx, /src/pages/Expenses.jsx, /src/pages/TestPerformance.jsx, /src/pages/Academic.jsx, /src/pages/AiLab.jsx, /src/pages/Attendance.jsx, /src/pages/TeacherPerformance.jsx, /src/pages/Students.jsx, /src/pages/Fees.jsx, /src/components/AuthBar.jsx, /src/pages/LandingPage.jsx[22m
+[2m7:34:17 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Admissions.jsx, /src/index.css[22m
+[2m7:34:37 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Admissions.jsx, /src/index.css[22m
+[2m7:34:53 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Admissions.jsx, /src/index.css[22m
+[2m7:35:04 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Admissions.jsx, /src/index.css[22m
+[2m7:35:33 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Admissions.jsx, /src/index.css[22m
+[2m7:35:51 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Admissions.jsx, /src/index.css[22m
+[2m7:52:04 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/index.css, /src/pages/super-admin/AuditLogsPage.jsx, /src/pages/super-admin/SuperAdminLayout.jsx, /src/pages/ParentPortal.jsx, /src/pages/super-admin/InstitutesPage.jsx, /src/pages/super-admin/RevenuePage.jsx, /src/pages/super-admin/OverviewPage.jsx, /src/pages/super-admin/UsagePage.jsx, /src/pages/Reports.jsx, /src/pages/Dashboard.jsx, /src/pages/Teachers.jsx, /src/pages/Automation.jsx, /src/pages/FollowUps.jsx, /src/pages/Ontology.jsx, /src/AuthContext.jsx, /src/pages/super-admin/SupportAccessPage.jsx, /src/pages/Expenses.jsx, /src/pages/TestPerformance.jsx, /src/pages/Academic.jsx, /src/pages/AiLab.jsx, /src/pages/Attendance.jsx, /src/pages/TeacherPerformance.jsx, /src/pages/Students.jsx, /src/pages/Fees.jsx, /src/components/AuthBar.jsx, /src/pages/LandingPage.jsx[22m
+[2m7:52:46 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.jsx, /src/index.css[22m
+[2m7:53:28 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Admissions.jsx, /src/index.css[22m
+[2m7:53:45 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Reports.jsx, /src/index.css[22m
+[2m8:08:04 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/index.css, /src/pages/super-admin/AuditLogsPage.jsx, /src/pages/super-admin/SuperAdminLayout.jsx, /src/pages/ParentPortal.jsx, /src/pages/super-admin/InstitutesPage.jsx, /src/pages/super-admin/RevenuePage.jsx, /src/pages/super-admin/OverviewPage.jsx, /src/pages/super-admin/UsagePage.jsx, /src/pages/Reports.jsx, /src/pages/Dashboard.jsx, /src/pages/Teachers.jsx, /src/pages/Automation.jsx, /src/pages/FollowUps.jsx, /src/pages/Ontology.jsx, /src/AuthContext.jsx, /src/pages/super-admin/SupportAccessPage.jsx, /src/pages/Expenses.jsx, /src/pages/TestPerformance.jsx, /src/pages/Academic.jsx, /src/pages/AiLab.jsx, /src/pages/Attendance.jsx, /src/pages/TeacherPerformance.jsx, /src/pages/Students.jsx, /src/pages/Fees.jsx, /src/components/AuthBar.jsx, /src/pages/LandingPage.jsx[22m
+[2m8:09:32 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.jsx, /src/index.css[22m
+[2m8:09:33 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/crm-layout.jsx, /src/index.css[22m

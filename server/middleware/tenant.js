@@ -1,3 +1,5 @@
+const { requireActiveTenant } = require('./tenant-status');
+
 function requireTenant(req, res, next) {
   if (!req.user) {
     return res.status(401).json({
@@ -15,7 +17,7 @@ function requireTenant(req, res, next) {
   req.user.tenantId = tenantId;
   req.user.tenant_id = tenantId;
 
-  return next();
+  return requireActiveTenant(req, res, next);
 }
 
 module.exports = {

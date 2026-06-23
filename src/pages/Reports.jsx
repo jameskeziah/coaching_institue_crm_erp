@@ -16,6 +16,7 @@ import {
   fetchFeePlans,
   fetchFeeReports,
   fetchFeesSummary,
+  fetchSourceAnalytics,
   fetchStaffAttendanceMonthly,
   fetchStudents,
 } from '@/api';
@@ -97,6 +98,7 @@ export default function Reports() {
     feeReports: {},
     expenses: { totals: {} },
     attendance: {},
+    sourceAnalytics: [],
     staff: { summary: [] },
   });
 
@@ -111,6 +113,7 @@ export default function Reports() {
         feeReports,
         expenses,
         attendance,
+        sourceAnalytics,
         staff,
       ] = await Promise.all([
         fetchStudents(),
@@ -119,10 +122,11 @@ export default function Reports() {
         fetchFeeReports(),
         fetchExpenseReports(nextMonth),
         fetchAttendanceReports(nextMonth),
+        fetchSourceAnalytics({ from: `${nextMonth}-01`, to: `${nextMonth}-31` }),
         fetchStaffAttendanceMonthly(nextMonth),
       ]);
 
-      setData({ students, feesSummary, feePlans, feeReports, expenses, attendance, staff });
+      setData({ students, feesSummary, feePlans, feeReports, expenses, attendance, sourceAnalytics: sourceAnalytics.data || [], staff });
     } catch (err) {
       setError(err.error || 'Could not load reports. Sign in with a finance/admin role and make sure the API server is running.');
     } finally {
@@ -188,6 +192,7 @@ export default function Reports() {
       categoryWiseExpenses: data.expenses?.categoryWise || [],
       billPending: data.expenses?.billPending || [],
       staffSummary: data.staff?.summary || [],
+      sourceAnalytics: data.sourceAnalytics || [],
     };
   }, [data]);
 
@@ -305,6 +310,22 @@ export default function Reports() {
           </ReportCard>
 
           <div className="grid gap-6 lg:grid-cols-2">
+            <ReportCard title="Source-wise Conversion" description="Admissions, conversion, revenue, and cost per admission by source.">
+              <DataTable
+                columns={['Source', 'Leads', 'Admissions', 'Conversion', 'Spend', 'Cost/admission', 'Revenue']}
+                rows={report.sourceAnalytics.map((row) => [
+                  String(row.source || 'UNKNOWN').replace(/_/g, ' '),
+                  number(row.totalLeads),
+                  number(row.convertedLeads),
+                  percent(row.conversionRate),
+                  money(row.campaignSpend),
+                  money(row.costPerAdmission),
+                  money(row.revenue),
+                ])}
+                empty="No source analytics yet."
+              />
+            </ReportCard>
+
             <ReportCard title="Fee Collection Trend" description="Recent daily collections.">
               <DataTable
                 columns={['Date', 'Collected', 'Payments']}

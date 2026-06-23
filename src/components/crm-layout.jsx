@@ -33,7 +33,8 @@ const navItems = [
   { title: 'Dashboard', href: '/dashboard', icon: LayoutDashboard, module: 'dashboard' },
   { title: 'Students', href: '/students', icon: Users, module: 'students' },
   { title: 'Admissions', href: '/admissions', icon: UserPlus, module: 'admissions' },
-  { title: 'Fees', href: '/fees', icon: IndianRupee, module: 'fees' },
+  { title: 'Fees', href: '/fees', icon: IndianRupee, module: 'fees', end: true },
+  { title: 'Fee Structures', href: '/fees/structures', icon: Receipt, module: 'fees' },
   { title: 'Follow-ups', href: '/follow-ups', icon: ListChecks, module: 'followUps' },
   { title: 'Expenses', href: '/expenses', icon: Receipt, module: 'expenses' },
   { title: 'Reports', href: '/reports', icon: BarChart3, module: 'reports' },
@@ -77,7 +78,7 @@ function SidebarContent() {
               <NavLink
                 key={item.href}
                 to={item.href}
-                end={item.href === '/dashboard'}
+                end={item.href === '/dashboard' || item.end}
                 className={({ isActive }) =>
                   [
                     'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',

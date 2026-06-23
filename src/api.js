@@ -4,6 +4,34 @@ export function getToken() {
   return localStorage.getItem('tps_token');
 }
 
+export function getPlatformToken() {
+  return localStorage.getItem('tps_platform_token');
+}
+
+export function setPlatformToken(token) {
+  localStorage.setItem('tps_platform_token', token);
+}
+
+export function removePlatformToken() {
+  localStorage.removeItem('tps_platform_token');
+  localStorage.removeItem('tps_platform_admin');
+}
+
+export function getStoredPlatformAdmin() {
+  const stored = localStorage.getItem('tps_platform_admin');
+  if (!stored) return null;
+  try {
+    return JSON.parse(stored);
+  } catch (err) {
+    return null;
+  }
+}
+
+export function setStoredPlatformAdmin(admin) {
+  if (!admin) return;
+  localStorage.setItem('tps_platform_admin', JSON.stringify(admin));
+}
+
 export function setToken(token) {
   localStorage.setItem('tps_token', token);
 }
@@ -80,6 +108,86 @@ export function register(username, password) {
   return request('/auth/register', { method: 'POST', body: JSON.stringify({ username, password }) });
 }
 
+export function onboardInstitute(payload) {
+  return request('/onboarding/institute', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+async function platformRequest(path, options = {}) {
+  const headers = options.headers || {};
+  headers['Content-Type'] = 'application/json';
+  const token = getPlatformToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (res.status === 401) removePlatformToken();
+    throw body;
+  }
+  return body;
+}
+
+export async function platformLogin(email, password) {
+  const result = await platformRequest('/platform-auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  });
+  setPlatformToken(result.token);
+  setStoredPlatformAdmin(result.admin);
+  return result;
+}
+
+export function fetchPlatformSummary() {
+  return platformRequest('/super-admin/summary');
+}
+
+export function fetchPlatformInstitutes(params = {}) {
+  const query = new URLSearchParams(
+    Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== '')
+  ).toString();
+  return platformRequest(`/super-admin/institutes${query ? `?${query}` : ''}`);
+}
+
+export function fetchPlatformInstituteDetail(tenantId) {
+  return platformRequest(`/super-admin/institutes/${tenantId}`);
+}
+
+export function updatePlatformTenantStatus(tenantId, status) {
+  return platformRequest(`/super-admin/institutes/${tenantId}/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status }),
+  });
+}
+
+export function fetchPlatformRevenue() {
+  return platformRequest('/super-admin/revenue');
+}
+
+export function fetchPlatformUsage(params = {}) {
+  const query = new URLSearchParams(
+    Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== '')
+  ).toString();
+  return platformRequest(`/super-admin/usage${query ? `?${query}` : ''}`);
+}
+
+export function fetchSupportAccessSessions() {
+  return platformRequest('/super-admin/support-access');
+}
+
+export function createSupportAccess(payload) {
+  return platformRequest('/super-admin/support-access', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function revokeSupportAccess(sessionId) {
+  return platformRequest(`/super-admin/support-access/${sessionId}`, { method: 'DELETE' });
+}
+
+export function fetchPlatformAuditLogs() {
+  return platformRequest('/super-admin/audit-logs');
+}
+
 export function fetchConfig() {
   return request('/config');
 }
@@ -107,17 +215,69 @@ export function updateUserRole(id, role) {
   return request(`/users/${id}/role`, { method: 'PUT', body: JSON.stringify({ role }) });
 }
 
-export function fetchAdmissions() {
-  return request('/admissions');
+function toQuery(params = {}) {
+  return new URLSearchParams(
+    Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== '')
+  ).toString();
+}
+
+export async function fetchAdmissions(params = {}) {
+  const query = toQuery(params);
+  const result = await request(`/admissions${query ? `?${query}` : ''}`);
+  return Array.isArray(result) ? result : (result.data || []);
+}
+
+export function fetchAdmissionAnalytics() {
+  return request('/admissions/analytics/summary');
 }
 export function createAdmission(payload) {
   return request('/admissions', { method: 'POST', body: JSON.stringify(payload) });
 }
 export function updateAdmission(id, payload) {
-  return request(`/admissions/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
+  return request(`/admissions/${id}`, { method: 'PATCH', body: JSON.stringify(payload) });
 }
 export function deleteAdmission(id) {
   return request(`/admissions/${id}`, { method: 'DELETE' });
+}
+
+export function getCounsellors() {
+  return request('/users/counsellors');
+}
+
+export function assignLeadCounsellor(leadId, counsellorId) {
+  return request(`/leads/${leadId}/counsellor`, {
+    method: 'PATCH',
+    body: JSON.stringify({ counsellorId }),
+  });
+}
+
+export function getLeadActivities(leadId) {
+  return request(`/leads/${leadId}/activities`);
+}
+
+export function createLeadActivity(leadId, payload) {
+  return request(`/leads/${leadId}/activities`, { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function fetchSourceAnalytics(params = {}) {
+  const query = toQuery(params);
+  return request(`/reports/source-analytics${query ? `?${query}` : ''}`);
+}
+
+export function fetchMarketingCampaigns() {
+  return request('/marketing-campaigns');
+}
+
+export function createMarketingCampaign(payload) {
+  return request('/marketing-campaigns', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function getPublicBranches(tenant) {
+  return request(`/public/branches?tenant=${encodeURIComponent(tenant)}`);
+}
+
+export function submitPublicEnquiry(payload) {
+  return request('/public/enquiries', { method: 'POST', body: JSON.stringify(payload) });
 }
 
 export function fetchStudents() {
@@ -184,8 +344,14 @@ export function fetchFeesSummary() {
   return request('/fees/summary');
 }
 
-export function fetchFeeStructures() {
-  return request('/fee-structures');
+export async function fetchFeeStructures(params = {}) {
+  const query = toQuery(params);
+  const result = await request(`/fee-structures${query ? `?${query}` : ''}`);
+  return Array.isArray(result) ? result : (result.data || []);
+}
+
+export function getFeeStructures(params = {}) {
+  return fetchFeeStructures(params);
 }
 
 export function createFeeStructure(payload) {
@@ -198,6 +364,10 @@ export function updateFeeStructure(id, payload) {
 
 export function deleteFeeStructure(id) {
   return request(`/fee-structures/${id}`, { method: 'DELETE' });
+}
+
+export function archiveFeeStructure(id) {
+  return request(`/fee-structures/${id}/archive`, { method: 'PATCH' });
 }
 
 export function fetchVendors() {

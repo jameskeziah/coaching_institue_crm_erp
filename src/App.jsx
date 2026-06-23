@@ -9,8 +9,11 @@ import AiLab from './pages/AiLab';
 import Attendance from './pages/Attendance';
 import Automation from './pages/Automation';
 import Dashboard from './pages/Dashboard';
+import EnquiryPage from './pages/EnquiryPage';
+import LandingPage from './pages/LandingPage';
 import Expenses from './pages/Expenses';
 import Fees from './pages/Fees';
+import FeeStructuresPage from './pages/FeeStructuresPage';
 import FollowUps from './pages/FollowUps';
 import OntologyAdmin from './pages/Ontology';
 import ParentPortal from './pages/ParentPortal';
@@ -19,6 +22,17 @@ import Students from './pages/Students';
 import TeacherPerformance from './pages/TeacherPerformance';
 import Teachers from './pages/Teachers';
 import TestPerformance from './pages/TestPerformance';
+import SuperAdminLayout from './pages/super-admin/SuperAdminLayout';
+import OverviewPage from './pages/super-admin/OverviewPage';
+import InstitutesPage from './pages/super-admin/InstitutesPage';
+import TrialsPage from './pages/super-admin/TrialsPage';
+import PaidCustomersPage from './pages/super-admin/PaidCustomersPage';
+import ExpiredTrialsPage from './pages/super-admin/ExpiredTrialsPage';
+import SuspendedTenantsPage from './pages/super-admin/SuspendedTenantsPage';
+import RevenuePage from './pages/super-admin/RevenuePage';
+import UsagePage from './pages/super-admin/UsagePage';
+import SupportAccessPage from './pages/super-admin/SupportAccessPage';
+import AuditLogsPage from './pages/super-admin/AuditLogsPage';
 
 function ModuleRoute({ moduleName, children }) {
   const { canAccess } = useAuth();
@@ -28,8 +42,21 @@ function ModuleRoute({ moduleName, children }) {
 function AppRoutes() {
   return (
     <Routes>
+      <Route index element={<LandingPage />} />
+      <Route path="/enquiry" element={<EnquiryPage />} />
+      <Route path="/super-admin" element={<SuperAdminLayout />}>
+        <Route index element={<OverviewPage />} />
+        <Route path="institutes" element={<InstitutesPage />} />
+        <Route path="trials" element={<TrialsPage />} />
+        <Route path="paid-customers" element={<PaidCustomersPage />} />
+        <Route path="expired-trials" element={<ExpiredTrialsPage />} />
+        <Route path="suspended" element={<SuspendedTenantsPage />} />
+        <Route path="revenue" element={<RevenuePage />} />
+        <Route path="usage" element={<UsagePage />} />
+        <Route path="support-access" element={<SupportAccessPage />} />
+        <Route path="audit-logs" element={<AuditLogsPage />} />
+      </Route>
       <Route element={<CRMLayout />}>
-        <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<ModuleRoute moduleName="dashboard"><Dashboard /></ModuleRoute>} />
         <Route path="/teachers" element={<ModuleRoute moduleName="teachers"><Teachers /></ModuleRoute>} />
         <Route path="/students" element={<ModuleRoute moduleName="students"><Students /></ModuleRoute>} />
@@ -40,6 +67,7 @@ function AppRoutes() {
         <Route path="/automation" element={<ModuleRoute moduleName="automation"><Automation /></ModuleRoute>} />
         <Route path="/ai-lab" element={<ModuleRoute moduleName="aiLab"><AiLab /></ModuleRoute>} />
         <Route path="/fees" element={<ModuleRoute moduleName="fees"><Fees /></ModuleRoute>} />
+        <Route path="/fees/structures" element={<ModuleRoute moduleName="fees"><FeeStructuresPage /></ModuleRoute>} />
         <Route path="/follow-ups" element={<ModuleRoute moduleName="followUps"><FollowUps /></ModuleRoute>} />
         <Route path="/expenses" element={<ModuleRoute moduleName="expenses"><Expenses /></ModuleRoute>} />
         <Route path="/reports" element={<ModuleRoute moduleName="reports"><Reports /></ModuleRoute>} />

@@ -151,7 +151,7 @@ export default function Dashboard() {
       result: calculateReviewScore(review.scores),
     }));
     const weakReviews = latestReviews.filter((review) => ['C', 'D'].includes(review.result.grade));
-    const openAdmissions = admissions.filter((item) => !['Converted', 'Lost', 'Rejected'].includes(item.status)).length;
+    const openAdmissions = admissions.filter((item) => !['Converted', 'Lost', 'Rejected', 'WON', 'LOST'].includes(item.status)).length;
     const overduePlans = feePlans
       .filter((plan) => Number(plan.dueAmount || 0) > 0 && (plan.feeStatus === 'Overdue' || plan.nextDueDate < today()))
       .sort((a, b) => Number(b.dueAmount || 0) - Number(a.dueAmount || 0));

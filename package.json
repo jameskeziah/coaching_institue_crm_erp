@@ -11,6 +11,12 @@
     "start:server": "node server/index.js",
     "start:server:production": "cross-env NODE_ENV=production node server/index.js",
     "migrate:tenant": "node server/migrations/add-tenant-columns.js",
+    "migrate:admissions-columns": "node server/migrations/011-admission-real-columns.js",
+    "migrate:admissions-backfill": "node server/migrations/012-backfill-admission-json.js",
+    "migrate:lead-activities": "node server/migrations/013-lead-activities.js",
+    "migrate:admission-growth": "node server/migrations/014-admission-assignment-duplicates-campaigns.js",
+    "migrate:fee-structures": "node server/migrations/015-fee-structure-templates.js",
+    "seed:super-admin": "node server/scripts/create-super-admin.js",
     "test:smoke": "node scripts/smoke-test.mjs",
     "test:ui": "playwright test"
   },

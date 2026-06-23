@@ -6,8 +6,16 @@ const { migrate } = require('./db');
 const authRoutes = require('./routes/auth.routes');
 const usersRoutes = require('./routes/users.routes');
 const invitesRoutes = require('./routes/invites.routes');
+const onboardingRoutes = require('./routes/onboarding.routes');
+const platformAuthRoutes = require('./routes/platform-auth.routes');
+const superAdminRoutes = require('./routes/super-admin.routes');
 const admissionsRoutes = require('./routes/admissions.routes');
+const leadActivitiesRoutes = require('./routes/leadActivities.routes');
+const leadManagementRoutes = require('./routes/leadManagement.routes');
+const sourceAnalyticsRoutes = require('./routes/sourceAnalytics.routes');
+const publicEnquiryRoutes = require('./routes/publicEnquiry.routes');
 const studentsRoutes = require('./routes/students.routes');
+const feeStructuresRoutes = require('./routes/feeStructures.routes');
 const legacyRoutes = require('./routes/legacy.routes');
 
 const app = express();
@@ -26,8 +34,16 @@ app.get('/api/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/invites', invitesRoutes);
+app.use('/api/onboarding', onboardingRoutes);
+app.use('/api/platform-auth', platformAuthRoutes);
+app.use('/api/super-admin', superAdminRoutes);
 app.use('/api/admissions', admissionsRoutes);
+app.use('/api', leadActivitiesRoutes);
+app.use('/api', leadManagementRoutes);
+app.use('/api', sourceAnalyticsRoutes);
+app.use('/api', publicEnquiryRoutes);
 app.use('/api/students', studentsRoutes);
+app.use('/api', feeStructuresRoutes);
 
 // Remaining routes are migrated module by module while preserving frontend URLs.
 app.use(legacyRoutes);

@@ -1,6 +1,8 @@
 const path = require('path');
 const bcrypt = require('bcryptjs');
 const { env } = require('./config/env');
+const { normalizeStatus, normalizeTemperature, safeJsonParse } = require('./services/admission.service');
+const { normalizeIndianPhone } = require('./utils/phone');
 
 const DB_PATH = path.join(__dirname, 'data.sqlite');
 const DATABASE_URL = env.DATABASE_URL;
@@ -170,6 +172,7 @@ function normalizePostgresRow(row) {
     averageattendance: 'averageAttendance',
     irregularstudents: 'irregularStudents',
     parentphone: 'parentPhone',
+    parentphonenormalized: 'parentPhoneNormalized',
     staffid: 'staffId',
     staffname: 'staffName',
     checkin: 'checkIn',
@@ -215,6 +218,32 @@ function normalizePostgresRow(row) {
     modulename: 'moduleName',
     studentName: 'studentName',
     studentname: 'studentName',
+    parentname: 'parentName',
+    classname: 'className',
+    courseinterested: 'courseInterested',
+    targetexam: 'targetExam',
+    branchid: 'branchId',
+    subsource: 'subSource',
+    counsellorid: 'counsellorId',
+    counsellor_id: 'counsellor_id',
+    leadtemperature: 'leadTemperature',
+    nextfollowupat: 'nextFollowUpAt',
+    lastcontactedat: 'lastContactedAt',
+    demodate: 'demoDate',
+    demoteacherid: 'demoTeacherId',
+    estimatedrevenue: 'estimatedRevenue',
+    convertedstudentid: 'convertedStudentId',
+    convertedat: 'convertedAt',
+    lostreason: 'lostReason',
+    spendamount: 'spendAmount',
+    startdate: 'startDate',
+    enddate: 'endDate',
+    isactive: 'isActive',
+    totalleads: 'totalLeads',
+    convertedleads: 'convertedLeads',
+    campaignspend: 'campaignSpend',
+    costperadmission: 'costPerAdmission',
+    customfields: 'customFields',
     parentName: 'parentName',
     parentname: 'parentName',
     mobileNumber: 'mobileNumber',
@@ -1858,6 +1887,279 @@ async function migrateFeeColumns() {
   await addColumnIfMissing('fee_payments', 'cancelReason', 'TEXT');
 }
 
+async function migrateFeeStructureTemplates() {
+  const installmentIdColumn = isPostgres ? 'SERIAL PRIMARY KEY' : 'INTEGER PRIMARY KEY AUTOINCREMENT';
+  const integerType = isPostgres ? 'INTEGER' : 'INTEGER';
+
+  const columns = [
+    ['tenant_id', `${integerType}`],
+    ['branch_id', 'TEXT'],
+    ['name', 'TEXT'],
+    ['code', 'TEXT'],
+    ['category', 'TEXT'],
+    ['academic_year', 'TEXT'],
+    ['class_from', 'TEXT'],
+    ['class_to', 'TEXT'],
+    ['target_exam', 'TEXT'],
+    ['duration_months', 'INTEGER'],
+    ['total_amount', 'REAL DEFAULT 0'],
+    ['admission_fee', 'REAL DEFAULT 0'],
+    ['tuition_fee', 'REAL DEFAULT 0'],
+    ['material_fee', 'REAL DEFAULT 0'],
+    ['test_series_fee', 'REAL DEFAULT 0'],
+    ['technology_fee', 'REAL DEFAULT 0'],
+    ['other_fee', 'REAL DEFAULT 0'],
+    ['installments_allowed', 'INTEGER DEFAULT 1'],
+    ['discount_allowed', 'INTEGER DEFAULT 1'],
+    ['max_discount_amount', 'REAL DEFAULT 0'],
+    ['max_discount_percent', 'REAL DEFAULT 0'],
+    ['is_default', 'INTEGER DEFAULT 0'],
+    ['is_active', 'INTEGER DEFAULT 1'],
+    ['created_at', 'TEXT'],
+    ['updated_at', 'TEXT'],
+  ];
+
+  for (const [column, definition] of columns) {
+    await addColumnIfMissing('fee_structures', column, definition);
+  }
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS fee_structure_installments (
+      id ${installmentIdColumn},
+      tenant_id ${integerType} NOT NULL,
+      fee_structure_id ${integerType} NOT NULL,
+      installment_number INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      amount REAL NOT NULL DEFAULT 0,
+      due_after_days INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT,
+      FOREIGN KEY(tenant_id) REFERENCES tenants(id),
+      FOREIGN KEY(fee_structure_id) REFERENCES fee_structures(id)
+    )`
+  );
+
+  await run(`UPDATE fee_structures SET name = COALESCE(name, courseName) WHERE name IS NULL`);
+  await run(
+    `UPDATE fee_structures
+     SET code = COALESCE(
+       code,
+       UPPER(REPLACE(REPLACE(REPLACE(TRIM(COALESCE(courseName, name, 'FEE_STRUCTURE')), ' / ', '_'), ' ', '_'), '-', '_'))
+     )
+     WHERE code IS NULL`
+  );
+  await run(`UPDATE fee_structures SET category = COALESCE(category, 'OTHER') WHERE category IS NULL`);
+  await run(`UPDATE fee_structures SET academic_year = COALESCE(academic_year, '2026-27') WHERE academic_year IS NULL`);
+  await run(`UPDATE fee_structures SET total_amount = COALESCE(total_amount, feeAmount, 0) WHERE total_amount IS NULL OR total_amount = 0`);
+  await run(`UPDATE fee_structures SET tuition_fee = COALESCE(NULLIF(tuition_fee, 0), total_amount, feeAmount, 0) WHERE tuition_fee IS NULL OR tuition_fee = 0`);
+  await run(`UPDATE fee_structures SET duration_months = COALESCE(duration_months, 12) WHERE duration_months IS NULL`);
+  await run(`UPDATE fee_structures SET installments_allowed = COALESCE(installments_allowed, 1) WHERE installments_allowed IS NULL`);
+  await run(`UPDATE fee_structures SET discount_allowed = COALESCE(discount_allowed, 1) WHERE discount_allowed IS NULL`);
+  await run(`UPDATE fee_structures SET max_discount_amount = COALESCE(max_discount_amount, 0) WHERE max_discount_amount IS NULL`);
+  await run(`UPDATE fee_structures SET max_discount_percent = COALESCE(max_discount_percent, 0) WHERE max_discount_percent IS NULL`);
+  await run(`UPDATE fee_structures SET is_default = COALESCE(is_default, 0) WHERE is_default IS NULL`);
+  await run(`UPDATE fee_structures SET is_active = CASE WHEN COALESCE(status, 'Active') = 'Inactive' THEN 0 ELSE COALESCE(is_active, 1) END WHERE is_active IS NULL OR status = 'Inactive'`);
+  await run(`UPDATE fee_structures SET created_at = COALESCE(created_at, createdAt, CAST(CURRENT_TIMESTAMP AS TEXT)) WHERE created_at IS NULL`);
+  await run(`UPDATE fee_structures SET updated_at = COALESCE(updated_at, updatedAt, CAST(CURRENT_TIMESTAMP AS TEXT)) WHERE updated_at IS NULL`);
+
+  const defaultTenant = await get(`SELECT id FROM tenants ORDER BY id LIMIT 1`);
+  if (defaultTenant) {
+    await run(`UPDATE fee_structures SET tenant_id = ? WHERE tenant_id IS NULL`, [defaultTenant.id]);
+  }
+
+  await run(`CREATE INDEX IF NOT EXISTS idx_fee_structures_tenant_year ON fee_structures (tenant_id, academic_year, is_active)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_fee_structures_tenant_branch ON fee_structures (tenant_id, branch_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_fee_structures_tenant_code ON fee_structures (tenant_id, code, academic_year, branch_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_fee_structure_installments_structure ON fee_structure_installments (fee_structure_id, installment_number)`);
+}
+
+async function migrateFeeFlowHardening() {
+  await run(
+    `CREATE TABLE IF NOT EXISTS tenant_fee_settings (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL UNIQUE,
+      academic_year TEXT NOT NULL DEFAULT '2026-27',
+      currency TEXT NOT NULL DEFAULT 'INR',
+      default_installment_count INTEGER NOT NULL DEFAULT 3,
+      default_installment_gap_days INTEGER NOT NULL DEFAULT 30,
+      receipt_prefix TEXT NOT NULL DEFAULT 'RCPT',
+      next_receipt_number INTEGER NOT NULL DEFAULT 1,
+      razorpay_enabled INTEGER NOT NULL DEFAULT 0,
+      razorpay_key_id TEXT,
+      razorpay_key_secret_encrypted TEXT,
+      razorpay_webhook_secret_encrypted TEXT,
+      payment_link_expiry_days INTEGER NOT NULL DEFAULT 7,
+      auto_send_payment_link INTEGER NOT NULL DEFAULT 0,
+      discount_approval_required INTEGER NOT NULL DEFAULT 1,
+      max_auto_discount_amount INTEGER NOT NULL DEFAULT 0,
+      max_auto_discount_percent INTEGER NOT NULL DEFAULT 0,
+      authorized_signature_url TEXT,
+      receipt_footer_note TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS student_fee_plans (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      student_id TEXT NOT NULL,
+      lead_id TEXT,
+      fee_structure_id TEXT,
+      course_name TEXT NOT NULL,
+      academic_year TEXT NOT NULL,
+      total_amount INTEGER NOT NULL,
+      discount_amount INTEGER NOT NULL DEFAULT 0,
+      payable_amount INTEGER NOT NULL,
+      paid_amount INTEGER NOT NULL DEFAULT 0,
+      pending_amount INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS student_fee_installments (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      student_fee_plan_id TEXT NOT NULL,
+      installment_number INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      amount INTEGER NOT NULL,
+      paid_amount INTEGER NOT NULL DEFAULT 0,
+      pending_amount INTEGER NOT NULL,
+      due_date TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (student_fee_plan_id) REFERENCES student_fee_plans(id) ON DELETE CASCADE
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS fee_payment_links (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      student_fee_plan_id TEXT NOT NULL,
+      student_fee_installment_id TEXT,
+      razorpay_payment_link_id TEXT UNIQUE,
+      razorpay_short_url TEXT,
+      amount INTEGER NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'INR',
+      parent_phone TEXT,
+      parent_email TEXT,
+      status TEXT NOT NULL DEFAULT 'CREATED',
+      expires_at TEXT,
+      sent_at TEXT,
+      paid_at TEXT,
+      cancelled_at TEXT,
+      metadata TEXT DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS razorpay_webhook_events (
+      id TEXT PRIMARY KEY,
+      event_id TEXT UNIQUE,
+      event_type TEXT NOT NULL,
+      razorpay_entity_id TEXT,
+      payload TEXT NOT NULL,
+      processed INTEGER NOT NULL DEFAULT 0,
+      processing_error TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      processed_at TEXT
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS fee_discount_requests (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      student_fee_plan_id TEXT NOT NULL,
+      student_id TEXT NOT NULL,
+      requested_amount INTEGER NOT NULL DEFAULT 0,
+      requested_percent INTEGER NOT NULL DEFAULT 0,
+      reason TEXT NOT NULL,
+      proof_note TEXT,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      requested_by_user_id TEXT NOT NULL,
+      approved_by_user_id TEXT,
+      approved_at TEXT,
+      rejected_by_user_id TEXT,
+      rejected_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS audit_logs (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      actor_user_id TEXT,
+      action TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      metadata TEXT DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  const paymentColumns = [
+    ['student_fee_plan_id', 'TEXT'],
+    ['student_fee_installment_id', 'TEXT'],
+    ['payment_mode', 'TEXT'],
+    ['razorpay_payment_id', 'TEXT'],
+    ['razorpay_payment_link_id', 'TEXT'],
+    ['refund_status', 'TEXT'],
+    ['refunded_amount', 'INTEGER NOT NULL DEFAULT 0'],
+    ['paid_at', 'TEXT'],
+    ['created_at', 'TEXT'],
+    ['updated_at', 'TEXT'],
+  ];
+  for (const [column, definition] of paymentColumns) {
+    await addColumnIfMissing('fee_payments', column, definition);
+  }
+
+  const receiptColumns = [
+    ['tenant_id', 'TEXT'],
+    ['receipt_number', 'TEXT'],
+    ['student_name', 'TEXT'],
+    ['course_name', 'TEXT'],
+    ['amount_paid', 'INTEGER'],
+    ['payment_mode', 'TEXT'],
+    ['pending_balance', 'INTEGER'],
+    ['branch_name', 'TEXT'],
+    ['receipt_date', 'TEXT'],
+    ['pdf_path', 'TEXT'],
+    ['created_at', 'TEXT'],
+  ];
+  for (const [column, definition] of receiptColumns) {
+    await addColumnIfMissing('fee_receipts', column, definition);
+  }
+
+  const tenants = await all(`SELECT id FROM tenants`);
+  for (const tenant of tenants) {
+    await run(
+      `INSERT INTO tenant_fee_settings
+        (id, tenant_id, academic_year, currency, created_at, updated_at)
+       SELECT ?, ?, '2026-27', 'INR', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+       WHERE NOT EXISTS (SELECT 1 FROM tenant_fee_settings WHERE tenant_id = ?)`,
+      [`fee_set_${tenant.id}`, String(tenant.id), String(tenant.id)]
+    );
+  }
+
+  await run(`CREATE INDEX IF NOT EXISTS idx_student_fee_plans_tenant_student ON student_fee_plans (tenant_id, student_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_student_fee_installments_plan ON student_fee_installments (student_fee_plan_id, installment_number)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_student_fee_installments_due ON student_fee_installments (tenant_id, due_date, status)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_fee_payment_links_installment ON fee_payment_links (tenant_id, student_fee_installment_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_fee_discount_requests_plan ON fee_discount_requests (tenant_id, student_fee_plan_id, status)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_entity ON audit_logs (tenant_id, entity_type, entity_id)`);
+}
+
 async function migrateExpenseColumns() {
   await addColumnIfMissing('expenses', 'paymentDate', 'TEXT');
   await addColumnIfMissing('expenses', 'transactionId', 'TEXT');
@@ -1897,6 +2199,430 @@ async function migrateAuthColumns() {
   await run(`UPDATE users SET email_verified_at = CURRENT_TIMESTAMP WHERE email_verified_at IS NULL AND password IS NOT NULL AND created_at IS NULL`);
   await run(`UPDATE users SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL`);
   await run(`UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL`);
+}
+
+function pickAdmissionValue(data, keys, fallback = null) {
+  for (const key of keys) {
+    if (data[key] !== undefined && data[key] !== null && data[key] !== '') {
+      return data[key];
+    }
+  }
+  return fallback;
+}
+
+async function migrateAdmissionRealColumns() {
+  const columns = [
+    ['studentName', 'TEXT'],
+    ['parentName', 'TEXT'],
+    ['parentPhone', 'TEXT'],
+    ['className', 'TEXT'],
+    ['school', 'TEXT'],
+    ['courseInterested', 'TEXT'],
+    ['targetExam', 'TEXT'],
+    ['branchId', 'TEXT'],
+    ['subSource', 'TEXT'],
+    ['campaign', 'TEXT'],
+    ['counsellorId', 'TEXT'],
+    ['counsellor_id', 'TEXT'],
+    ['leadTemperature', "TEXT DEFAULT 'WARM'"],
+    ['nextFollowUpAt', 'TEXT'],
+    ['lastContactedAt', 'TEXT'],
+    ['demoDate', 'TEXT'],
+    ['demoTeacherId', 'TEXT'],
+    ['estimatedRevenue', 'INTEGER DEFAULT 0'],
+    ['convertedStudentId', 'TEXT'],
+    ['convertedAt', 'TEXT'],
+    ['lostReason', 'TEXT'],
+    ['parentPhoneNormalized', 'TEXT'],
+    ['parent_phone_normalized', 'TEXT'],
+    ['customFields', 'TEXT'],
+    ['created_by', 'TEXT'],
+    ['created_at', 'TEXT'],
+    ['updated_at', 'TEXT'],
+    ['deleted_at', 'TEXT'],
+  ];
+
+  for (const [column, definition] of columns) {
+    await addColumnIfMissing('admissions', column, definition);
+  }
+
+  await run(`UPDATE admissions SET created_at = COALESCE(created_at, CAST(CURRENT_TIMESTAMP AS TEXT)) WHERE created_at IS NULL`);
+  await run(`UPDATE admissions SET updated_at = COALESCE(updated_at, CAST(CURRENT_TIMESTAMP AS TEXT)) WHERE updated_at IS NULL`);
+  await run(`UPDATE admissions SET status = COALESCE(status, 'NEW') WHERE status IS NULL`);
+  await run(`UPDATE admissions SET leadTemperature = COALESCE(leadTemperature, 'WARM') WHERE leadTemperature IS NULL`);
+  await run(`UPDATE admissions SET estimatedRevenue = COALESCE(estimatedRevenue, 0) WHERE estimatedRevenue IS NULL`);
+  await run(`UPDATE admissions SET counsellor_id = COALESCE(counsellor_id, counsellorId) WHERE counsellor_id IS NULL`);
+
+  const rows = await all(
+    `SELECT id, name, program, status, source, data, parentPhone, parentPhoneNormalized
+     FROM admissions
+     WHERE deleted_at IS NULL`
+  );
+
+  for (const row of rows) {
+    const data = safeJsonParse(row.data);
+    const values = {
+      studentName: pickAdmissionValue(data, ['studentName', 'student_name', 'name'], row.name),
+      parentName: pickAdmissionValue(data, ['parentName', 'parent_name', 'guardianName']),
+      parentPhone: pickAdmissionValue(data, ['parentPhone', 'parent_phone', 'mobile', 'phone']),
+      className: pickAdmissionValue(data, ['className', 'class_name', 'class']),
+      school: pickAdmissionValue(data, ['school', 'schoolName']),
+      courseInterested: pickAdmissionValue(data, ['courseInterested', 'course_interested', 'course'], row.program),
+      targetExam: pickAdmissionValue(data, ['targetExam', 'target_exam', 'exam']),
+      branchId: pickAdmissionValue(data, ['branchId', 'branch_id', 'branch']),
+      source: pickAdmissionValue(data, ['source'], row.source),
+      subSource: pickAdmissionValue(data, ['subSource', 'sub_source']),
+      campaign: pickAdmissionValue(data, ['campaign']),
+      counsellorId: pickAdmissionValue(data, ['counsellorId', 'counsellor_id', 'counsellor']),
+      status: normalizeStatus(pickAdmissionValue(data, ['status'], row.status)),
+      leadTemperature: normalizeTemperature(pickAdmissionValue(data, ['leadTemperature', 'lead_temperature'])),
+      nextFollowUpAt: pickAdmissionValue(data, ['nextFollowUpAt', 'next_follow_up_at', 'nextFollowUpDate']),
+      lastContactedAt: pickAdmissionValue(data, ['lastContactedAt', 'last_contacted_at']),
+      demoDate: pickAdmissionValue(data, ['demoDate', 'demo_date']),
+      demoTeacherId: pickAdmissionValue(data, ['demoTeacherId', 'demo_teacher_id', 'demoTeacher']),
+      estimatedRevenue: Number(pickAdmissionValue(data, ['estimatedRevenue', 'estimated_revenue'], 0)) || 0,
+      convertedStudentId: pickAdmissionValue(data, ['convertedStudentId', 'converted_student_id']),
+      convertedAt: pickAdmissionValue(data, ['convertedAt', 'converted_at', 'convertedDate']),
+      lostReason: pickAdmissionValue(data, ['lostReason', 'lost_reason']),
+    };
+    values.parentPhoneNormalized = normalizeIndianPhone(values.parentPhone || row.parentPhone);
+
+    await run(
+      `UPDATE admissions
+       SET
+         studentName = COALESCE(studentName, ?),
+         parentName = COALESCE(parentName, ?),
+         parentPhone = COALESCE(parentPhone, ?),
+         className = COALESCE(className, ?),
+         school = COALESCE(school, ?),
+         courseInterested = COALESCE(courseInterested, ?),
+         targetExam = COALESCE(targetExam, ?),
+         branchId = COALESCE(branchId, ?),
+         source = COALESCE(source, ?),
+         subSource = COALESCE(subSource, ?),
+         campaign = COALESCE(campaign, ?),
+         counsellorId = COALESCE(counsellorId, ?),
+         status = COALESCE(status, ?),
+         leadTemperature = COALESCE(leadTemperature, ?),
+         nextFollowUpAt = COALESCE(nextFollowUpAt, ?),
+         lastContactedAt = COALESCE(lastContactedAt, ?),
+         demoDate = COALESCE(demoDate, ?),
+         demoTeacherId = COALESCE(demoTeacherId, ?),
+         estimatedRevenue = COALESCE(estimatedRevenue, ?),
+         convertedStudentId = COALESCE(convertedStudentId, ?),
+         convertedAt = COALESCE(convertedAt, ?),
+         lostReason = COALESCE(lostReason, ?),
+         parentPhoneNormalized = COALESCE(parentPhoneNormalized, ?),
+         parent_phone_normalized = COALESCE(parent_phone_normalized, ?),
+         counsellor_id = COALESCE(counsellor_id, counsellorId)
+       WHERE id = ?`,
+      [
+        values.studentName,
+        values.parentName,
+        values.parentPhone,
+        values.className,
+        values.school,
+        values.courseInterested,
+        values.targetExam,
+        values.branchId,
+        values.source,
+        values.subSource,
+        values.campaign,
+        values.counsellorId,
+        values.status,
+        values.leadTemperature,
+        values.nextFollowUpAt,
+        values.lastContactedAt,
+        values.demoDate,
+        values.demoTeacherId,
+        values.estimatedRevenue,
+        values.convertedStudentId,
+        values.convertedAt,
+        values.lostReason,
+        values.parentPhoneNormalized,
+        values.parentPhoneNormalized,
+        row.id,
+      ]
+    );
+  }
+
+  await run(`UPDATE admissions SET parentPhoneNormalized = parent_phone_normalized WHERE parentPhoneNormalized IS NULL AND parent_phone_normalized IS NOT NULL`);
+  await run(`UPDATE admissions SET parent_phone_normalized = parentPhoneNormalized WHERE parent_phone_normalized IS NULL AND parentPhoneNormalized IS NOT NULL`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_admissions_tenant_status ON admissions (tenant_id, status, deleted_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_admissions_tenant_branch ON admissions (tenant_id, branchId, deleted_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_admissions_tenant_counsellor ON admissions (tenant_id, counsellorId, deleted_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_admissions_counsellor_id ON admissions (counsellor_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_admissions_tenant_counsellor_id ON admissions (tenant_id, counsellor_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_admissions_parent_phone_normalized ON admissions (tenant_id, parentPhoneNormalized)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_admissions_student_phone ON admissions (tenant_id, studentName, parentPhoneNormalized)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_admissions_source ON admissions (tenant_id, source)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_admissions_campaign ON admissions (tenant_id, campaign)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_admissions_converted_at ON admissions (tenant_id, convertedAt)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_admissions_tenant_followup ON admissions (tenant_id, nextFollowUpAt, deleted_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_admissions_tenant_temperature ON admissions (tenant_id, leadTemperature, deleted_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_admissions_tenant_created ON admissions (tenant_id, created_at, deleted_at)`);
+}
+
+async function migrateMarketingCampaigns() {
+  const integerType = isPostgres ? 'INTEGER' : 'INTEGER';
+  const timestampDefault = isPostgres ? 'DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT)' : 'DEFAULT CURRENT_TIMESTAMP';
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS marketing_campaigns (
+      id TEXT PRIMARY KEY,
+      tenant_id ${integerType} NOT NULL,
+      branch_id TEXT,
+      name TEXT NOT NULL,
+      source TEXT NOT NULL,
+      spend_amount INTEGER NOT NULL DEFAULT 0,
+      start_date TEXT,
+      end_date TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL ${timestampDefault},
+      updated_at TEXT NOT NULL ${timestampDefault}
+    )`
+  );
+
+  await run(`CREATE INDEX IF NOT EXISTS idx_marketing_campaigns_tenant_source ON marketing_campaigns (tenant_id, source)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_marketing_campaigns_tenant_name ON marketing_campaigns (tenant_id, name)`);
+}
+
+async function migrateLeadActivities() {
+  const integerType = isPostgres ? 'INTEGER' : 'INTEGER';
+  const timestampDefault = isPostgres ? 'DEFAULT CAST(CURRENT_TIMESTAMP AS TEXT)' : 'DEFAULT CURRENT_TIMESTAMP';
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS lead_activities (
+      id TEXT PRIMARY KEY,
+      tenant_id ${integerType} NOT NULL,
+      lead_id ${integerType} NOT NULL,
+      branch_id TEXT,
+      created_by_user_id TEXT,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      note TEXT,
+      old_status TEXT,
+      new_status TEXT,
+      activity_at TEXT NOT NULL ${timestampDefault},
+      metadata TEXT DEFAULT '{}',
+      created_at TEXT NOT NULL ${timestampDefault},
+      FOREIGN KEY (lead_id) REFERENCES admissions(id) ON DELETE CASCADE
+    )`
+  );
+
+  await run(`CREATE INDEX IF NOT EXISTS idx_lead_activities_tenant_lead ON lead_activities (tenant_id, lead_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_lead_activities_activity_at ON lead_activities (activity_at DESC)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_lead_activities_type ON lead_activities (type)`);
+}
+
+async function migrateTenantOnboarding() {
+  const integerType = isPostgres ? 'INTEGER' : 'INTEGER';
+
+  await addColumnIfMissing('tenants', 'plan', "TEXT DEFAULT 'trial'");
+  await addColumnIfMissing('tenants', 'contact_email', 'TEXT');
+  await addColumnIfMissing('tenants', 'contact_phone', 'TEXT');
+  await addColumnIfMissing('tenants', 'created_by', 'TEXT');
+  await addColumnIfMissing('tenants', 'created_at', 'TEXT');
+  await addColumnIfMissing('tenants', 'updated_at', 'TEXT');
+  await addColumnIfMissing('tenants', 'deleted_at', 'TEXT');
+
+  await addColumnIfMissing('fee_plans', 'name', 'TEXT');
+  await addColumnIfMissing('fee_plans', 'course_type', 'TEXT');
+  await addColumnIfMissing('fee_plans', 'amount', 'INTEGER');
+  await addColumnIfMissing('fee_plans', 'billing_cycle', 'TEXT');
+  await addColumnIfMissing('fee_plans', 'duration_months', 'INTEGER');
+  await addColumnIfMissing('fee_plans', 'is_default', 'INTEGER DEFAULT 0');
+  await addColumnIfMissing('fee_plans', 'created_by', 'TEXT');
+  await addColumnIfMissing('fee_plans', 'created_at', 'TEXT');
+  await addColumnIfMissing('fee_plans', 'updated_at', 'TEXT');
+  await addColumnIfMissing('fee_plans', 'deleted_at', 'TEXT');
+
+  await addColumnIfMissing('message_templates', 'name', 'TEXT');
+  await addColumnIfMissing('message_templates', 'category', 'TEXT');
+  await addColumnIfMissing('message_templates', 'is_default', 'INTEGER DEFAULT 0');
+  await addColumnIfMissing('message_templates', 'created_by', 'TEXT');
+  await addColumnIfMissing('message_templates', 'deleted_at', 'TEXT');
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS branches (
+      id TEXT PRIMARY KEY,
+      tenant_id ${integerType} NOT NULL,
+      name TEXT NOT NULL,
+      code TEXT,
+      city TEXT,
+      address TEXT,
+      is_default INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_by TEXT NOT NULL,
+      deleted_at TEXT
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS tenant_roles (
+      id TEXT PRIMARY KEY,
+      tenant_id ${integerType} NOT NULL,
+      role_key TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      description TEXT,
+      is_system INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_by TEXT NOT NULL,
+      deleted_at TEXT,
+      UNIQUE (tenant_id, role_key)
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS dashboard_sample_metrics (
+      id TEXT PRIMARY KEY,
+      tenant_id ${integerType} NOT NULL,
+      metric_key TEXT NOT NULL,
+      metric_label TEXT NOT NULL,
+      metric_value INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_by TEXT NOT NULL,
+      deleted_at TEXT,
+      UNIQUE (tenant_id, metric_key)
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS tenant_onboarding_checklist (
+      id TEXT PRIMARY KEY,
+      tenant_id ${integerType} NOT NULL,
+      checklist_key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      is_completed INTEGER NOT NULL DEFAULT 0,
+      completed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_by TEXT NOT NULL,
+      deleted_at TEXT,
+      UNIQUE (tenant_id, checklist_key)
+    )`
+  );
+
+  await run(`UPDATE tenants SET plan = COALESCE(plan, subscriptionPlan, 'trial') WHERE plan IS NULL`);
+  await run(`UPDATE tenants SET contact_email = COALESCE(contact_email, billingEmail, '') WHERE contact_email IS NULL`);
+  await run(`UPDATE tenants SET created_at = COALESCE(created_at, CAST(createdAt AS TEXT), CAST(CURRENT_TIMESTAMP AS TEXT)) WHERE created_at IS NULL`);
+  await run(`UPDATE tenants SET updated_at = COALESCE(updated_at, CAST(updatedAt AS TEXT), CAST(CURRENT_TIMESTAMP AS TEXT)) WHERE updated_at IS NULL`);
+
+  await run(`CREATE INDEX IF NOT EXISTS idx_tenants_slug ON tenants (slug)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_branches_tenant ON branches (tenant_id, deleted_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_tenant_roles_tenant ON tenant_roles (tenant_id, deleted_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_fee_plans_tenant ON fee_plans (tenant_id, deleted_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_message_templates_tenant ON message_templates (tenant_id, deleted_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_dashboard_sample_metrics_tenant ON dashboard_sample_metrics (tenant_id, deleted_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_tenant_onboarding_checklist_tenant ON tenant_onboarding_checklist (tenant_id, deleted_at)`);
+}
+
+async function migrateSuperAdmin() {
+  const tenantIdType = isPostgres ? 'INTEGER' : 'INTEGER';
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS platform_admins (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'super_admin',
+      is_active INTEGER NOT NULL DEFAULT 1,
+      last_login_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      deleted_at TEXT
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS tenant_subscriptions (
+      id TEXT PRIMARY KEY,
+      tenant_id ${tenantIdType} NOT NULL,
+      plan TEXT NOT NULL DEFAULT 'trial',
+      status TEXT NOT NULL DEFAULT 'trialing',
+      monthly_amount INTEGER NOT NULL DEFAULT 0,
+      currency TEXT NOT NULL DEFAULT 'INR',
+      trial_started_at TEXT,
+      trial_ends_at TEXT,
+      current_period_start TEXT,
+      current_period_end TEXT,
+      canceled_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      deleted_at TEXT
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS tenant_payments (
+      id TEXT PRIMARY KEY,
+      tenant_id ${tenantIdType} NOT NULL,
+      subscription_id TEXT,
+      provider TEXT NOT NULL DEFAULT 'razorpay',
+      provider_payment_id TEXT,
+      amount INTEGER NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'INR',
+      status TEXT NOT NULL,
+      paid_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      deleted_at TEXT
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS tenant_usage_records (
+      id TEXT PRIMARY KEY,
+      tenant_id ${tenantIdType} NOT NULL,
+      metric_key TEXT NOT NULL,
+      metric_value INTEGER NOT NULL DEFAULT 0,
+      period_start TEXT NOT NULL,
+      period_end TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      deleted_at TEXT
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS support_access_sessions (
+      id TEXT PRIMARY KEY,
+      platform_admin_id TEXT NOT NULL,
+      tenant_id ${tenantIdType} NOT NULL,
+      reason TEXT NOT NULL,
+      access_type TEXT NOT NULL DEFAULT 'read_only',
+      expires_at TEXT NOT NULL,
+      revoked_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS platform_audit_logs (
+      id TEXT PRIMARY KEY,
+      platform_admin_id TEXT,
+      action TEXT NOT NULL,
+      target_type TEXT,
+      target_id TEXT,
+      metadata TEXT,
+      ip_address TEXT,
+      user_agent TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(`CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants (status, deleted_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_tenant_subscriptions_status ON tenant_subscriptions (status, deleted_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_tenant_subscriptions_tenant ON tenant_subscriptions (tenant_id, deleted_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_tenant_payments_tenant ON tenant_payments (tenant_id, deleted_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_tenant_usage_records_tenant_period ON tenant_usage_records (tenant_id, period_start, period_end)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_support_access_sessions_tenant ON support_access_sessions (tenant_id, revoked_at, expires_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_platform_audit_logs_admin ON platform_audit_logs (platform_admin_id, created_at)`);
 }
 
 async function ensureDefaultTenant() {
@@ -2188,7 +2914,14 @@ async function migrate() {
   await migrateExpenseColumns();
   await migrateAttendanceColumns();
   await migrateFollowUpColumns();
+  await migrateAdmissionRealColumns();
+  await migrateMarketingCampaigns();
+  await migrateLeadActivities();
   await migrateAuthColumns();
+  await migrateTenantOnboarding();
+  await migrateFeeStructureTemplates();
+  await migrateFeeFlowHardening();
+  await migrateSuperAdmin();
   await migrateTenantColumns();
   await migrateOperationalTenantColumns();
   await migrateBusinessTenantMetadataColumns();
@@ -2211,6 +2944,13 @@ module.exports = {
   all,
   get,
   migrate,
+  migrateFeeStructureTemplates,
+  migrateFeeFlowHardening,
+  migrateTenantOnboarding,
+  migrateSuperAdmin,
+  migrateAdmissionRealColumns,
+  migrateMarketingCampaigns,
+  migrateLeadActivities,
   migrateBusinessTenantMetadataColumns,
   migrateTenantIndexes,
   close,

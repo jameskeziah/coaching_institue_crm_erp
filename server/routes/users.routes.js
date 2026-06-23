@@ -10,6 +10,34 @@ const { hashPassword, validatePasswordStrength } = require('../services/password
 
 const router = express.Router();
 
+router.get('/counsellors', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.ADMISSIONS), async (req, res) => {
+  try {
+    const tenantId = req.user.tenant_id || req.user.tenantId;
+    const counsellors = await all(
+      `SELECT id, name, username, email, role, is_active
+       FROM users
+       WHERE tenant_id = ?
+       AND is_active = 1
+       AND deleted_at IS NULL
+       AND role IN (?, ?, ?, ?)
+       ORDER BY COALESCE(name, username, email) ASC`,
+      [tenantId, ROLES.OWNER, ROLES.DIRECTOR, ROLES.ADMIN, ROLES.COUNSELLOR]
+    );
+
+    return res.json({
+      data: counsellors.map((user) => ({
+        id: user.id,
+        fullName: user.name || user.username || user.email,
+        email: user.email || user.username,
+        role: user.role,
+        isActive: Boolean(user.is_active),
+      })),
+    });
+  } catch (error) {
+    return res.status(500).json({ message: 'Failed to load counsellors', error: 'Failed to load counsellors' });
+  }
+});
+
 router.get('/', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
   const users = await all(
     `SELECT users.id, users.username, users.name, users.email, users.role, users.tenant_id, users.email_verified_at,

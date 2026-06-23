@@ -390,11 +390,19 @@ async function main() {
   const admission = await request('/admissions', withAuth(token, {
     method: 'POST',
     body: JSON.stringify({
-      name: `Smoke Admission ${suffix}`,
-      program: 'X Science',
-      status: 'New lead',
+      studentName: `Smoke Admission ${suffix}`,
+      parentName: 'Smoke Parent',
+      parentPhone: '9999999999',
+      className: '10th',
+      school: 'Smoke School',
+      courseInterested: 'X Science',
+      targetExam: 'Boards',
+      branchId: 'Tembhurni',
+      status: 'NEW',
+      leadTemperature: 'HOT',
       source: 'Smoke test',
-      data: {},
+      nextFollowUpAt: '2026-06-05',
+      estimatedRevenue: 10000,
     }),
   }));
 
