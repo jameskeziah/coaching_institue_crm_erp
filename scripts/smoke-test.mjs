@@ -1028,7 +1028,7 @@ async function main() {
     expectAllowed('/fees/summary', accountantToken),
     expectAllowed('/fee-plans', accountantToken),
     expectAllowed('/expenses', accountantToken),
-    expectAllowed('/fee-plans', counsellorToken),
+    expectForbidden('/fee-plans', counsellorToken),
     expectAllowed('/follow-ups', counsellorToken),
     expectAllowed('/students', counsellorToken),
     expectAllowed('/admissions', counsellorToken),

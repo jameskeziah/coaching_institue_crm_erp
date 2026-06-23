@@ -86,3 +86,15 @@ The backend supports two database modes:
   Use `DATABASE_SSL=true` for hosted Postgres providers that require SSL.
 
 SQLite is fine for local/single-user use. Use Postgres before deploying this as a shared multi-user system.
+
+## Current Stack
+
+This project currently uses:
+
+- **Frontend:** Vite + React
+- **Backend:** Express
+- **Database:** SQLite for local development, optional Postgres for deployment
+- **Database access:** Raw SQL
+- **Authentication:** JWT username/password authentication
+
+This repository should not be mixed with the separate Next.js/NestJS/Prisma SaaS project unless a deliberate migration is planned.

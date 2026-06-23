@@ -1,9 +1,10 @@
 const path = require('path');
 const bcrypt = require('bcryptjs');
+const { env } = require('./config/env');
 
 const DB_PATH = path.join(__dirname, 'data.sqlite');
-const DATABASE_URL = process.env.DATABASE_URL;
-const isPostgres = Boolean(DATABASE_URL);
+const DATABASE_URL = env.DATABASE_URL;
+const isPostgres = /^postgres(ql)?:\/\//i.test(DATABASE_URL);
 
 let sqliteDb = null;
 let pgPool = null;
@@ -12,11 +13,12 @@ if (isPostgres) {
   const { Pool } = require('pg');
   pgPool = new Pool({
     connectionString: DATABASE_URL,
-    ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+    ssl: env.DATABASE_SSL ? { rejectUnauthorized: false } : undefined,
   });
 } else {
   const sqlite3 = require('sqlite3').verbose();
-  sqliteDb = new sqlite3.Database(DB_PATH);
+  const sqlitePath = DATABASE_URL ? path.resolve(process.cwd(), DATABASE_URL) : DB_PATH;
+  sqliteDb = new sqlite3.Database(sqlitePath);
 }
 
 function toPostgresSql(sql) {
@@ -1863,6 +1865,122 @@ async function migrateOperationalTenantColumns() {
   }
 }
 
+const tenantMetadataTables = [
+  // Academic
+  'academic_syllabus',
+  'academic_calendars',
+  'batch_timetables',
+  'lecture_plans',
+  'class_delivery_logs',
+  'homework_assignments',
+  'test_calendars',
+  'student_test_results',
+  'doubt_sessions',
+  'revision_plans',
+  'remedial_actions',
+
+  // Attendance and communication
+  'attendance_sessions',
+  'attendance_records',
+  'parent_alert_logs',
+  'parent_call_logs',
+  'automation_logs',
+  'staff_attendance_records',
+  'leave_requests',
+  'attendance_correction_requests',
+  'message_templates',
+  'fee_reminders',
+  'fee_audit_logs',
+
+  // Test performance
+  'performance_tests',
+  'performance_results',
+  'question_analysis',
+  'parent_report_logs',
+  'teacher_result_impact',
+  'remedial_students',
+  'omr_uploads',
+
+  // AI lab
+  'ai_lab_courses',
+  'ai_lab_modules',
+  'ai_lab_students',
+  'ai_lab_attendance',
+  'ai_lab_devices',
+  'ai_lab_device_allocations',
+  'ai_lab_projects',
+  'ai_lab_assignments',
+  'ai_lab_mentor_feedback',
+  'ai_lab_portfolios',
+  'ai_lab_certificates',
+];
+
+async function migrateBusinessTenantMetadataColumns() {
+  const tenant = await ensureDefaultTenant();
+  const tenantId = tenant?.id || null;
+  const systemUserId = process.env.SYSTEM_USER_ID || 'system';
+  const now = new Date().toISOString();
+
+  for (const table of tenantMetadataTables) {
+    await addColumnIfMissing(table, 'tenant_id', 'INTEGER');
+    await addColumnIfMissing(table, 'createdBy', 'TEXT');
+    await addColumnIfMissing(table, 'deletedAt', 'TEXT');
+    await addColumnIfMissing(table, 'updatedAt', 'TEXT');
+    await addColumnIfMissing(table, 'createdAt', 'TEXT');
+
+    if (tenantId) {
+      await run(
+        `UPDATE ${table}
+         SET
+           tenant_id = COALESCE(tenant_id, ?),
+           createdBy = COALESCE(createdBy, ?),
+           createdAt = COALESCE(createdAt, ?),
+           updatedAt = COALESCE(updatedAt, ?)
+         WHERE tenant_id IS NULL
+            OR createdBy IS NULL
+            OR createdAt IS NULL
+            OR updatedAt IS NULL`,
+        [tenantId, systemUserId, now, now]
+      );
+    }
+  }
+}
+
+async function migrateTenantIndexes() {
+  const indexSpecs = [
+    ['attendance_sessions', 'tenant_id, deletedAt, date'],
+    ['attendance_records', 'tenant_id, session_id'],
+    ['parent_alert_logs', 'tenant_id, createdAt'],
+    ['parent_call_logs', 'tenant_id, createdAt'],
+    ['automation_logs', 'tenant_id, createdAt'],
+    ['message_templates', 'tenant_id, deletedAt'],
+    ['academic_syllabus', 'tenant_id, deletedAt'],
+    ['academic_calendars', 'tenant_id, deletedAt'],
+    ['batch_timetables', 'tenant_id, deletedAt'],
+    ['lecture_plans', 'tenant_id, deletedAt'],
+    ['homework_assignments', 'tenant_id, deletedAt'],
+    ['test_calendars', 'tenant_id, deletedAt'],
+    ['student_test_results', 'tenant_id, student_id'],
+    ['performance_tests', 'tenant_id, deletedAt'],
+    ['performance_results', 'tenant_id, student_id'],
+    ['question_analysis', 'tenant_id, test_id'],
+    ['parent_report_logs', 'tenant_id, sentAt'],
+    ['omr_uploads', 'tenant_id, uploadedAt'],
+    ['ai_lab_courses', 'tenant_id, deletedAt'],
+    ['ai_lab_students', 'tenant_id, student_id'],
+    ['ai_lab_attendance', 'tenant_id, ai_lab_student_id'],
+    ['ai_lab_projects', 'tenant_id, ai_lab_student_id'],
+    ['ai_lab_assignments', 'tenant_id, ai_lab_student_id'],
+    ['ai_lab_mentor_feedback', 'tenant_id, ai_lab_student_id'],
+    ['ai_lab_certificates', 'tenant_id, ai_lab_student_id'],
+  ];
+
+  for (const [table, columns] of indexSpecs) {
+    const indexName = `idx_${table}_tenant_${columns.split(',')[0].replace(/[^a-zA-Z0-9_]/g, '')}`;
+    await run(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${table} (${columns})`);
+  }
+}
+
 async function seedAdmin() {
   const adminUsername = process.env.ADMIN_USERNAME;
   const adminPassword = process.env.ADMIN_PASSWORD;
@@ -1987,6 +2105,8 @@ async function migrate() {
   await migrateFollowUpColumns();
   await migrateTenantColumns();
   await migrateOperationalTenantColumns();
+  await migrateBusinessTenantMetadataColumns();
+  await migrateTenantIndexes();
   await seedAdmin();
   await seedOntology();
   await seedMessageTemplates();
@@ -2005,6 +2125,8 @@ module.exports = {
   all,
   get,
   migrate,
+  migrateBusinessTenantMetadataColumns,
+  migrateTenantIndexes,
   close,
   isPostgres,
 };

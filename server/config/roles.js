@@ -1,0 +1,70 @@
+const ROLES = {
+  OWNER: 'owner',
+  DIRECTOR: 'director',
+  ADMIN: 'admin',
+  ACCOUNTANT: 'accountant',
+  COUNSELLOR: 'counsellor',
+  TEACHER: 'teacher',
+  USER: 'user',
+};
+
+const ROLE_GROUPS = {
+  MANAGEMENT: [
+    ROLES.OWNER,
+    ROLES.DIRECTOR,
+    ROLES.ADMIN,
+  ],
+
+  FINANCE: [
+    ROLES.OWNER,
+    ROLES.DIRECTOR,
+    ROLES.ADMIN,
+    ROLES.ACCOUNTANT,
+  ],
+
+  ADMISSIONS: [
+    ROLES.OWNER,
+    ROLES.DIRECTOR,
+    ROLES.ADMIN,
+    ROLES.COUNSELLOR,
+  ],
+
+  STUDENTS: [
+    ROLES.OWNER,
+    ROLES.DIRECTOR,
+    ROLES.ADMIN,
+    ROLES.COUNSELLOR,
+    ROLES.TEACHER,
+  ],
+
+  ACADEMIC: [
+    ROLES.OWNER,
+    ROLES.DIRECTOR,
+    ROLES.ADMIN,
+    ROLES.TEACHER,
+  ],
+
+  STAFF: [
+    ROLES.OWNER,
+    ROLES.DIRECTOR,
+    ROLES.ADMIN,
+    ROLES.ACCOUNTANT,
+    ROLES.COUNSELLOR,
+    ROLES.TEACHER,
+  ],
+
+  ALL_AUTHENTICATED: [
+    ROLES.OWNER,
+    ROLES.DIRECTOR,
+    ROLES.ADMIN,
+    ROLES.ACCOUNTANT,
+    ROLES.COUNSELLOR,
+    ROLES.TEACHER,
+    ROLES.USER,
+  ],
+};
+
+module.exports = {
+  ROLES,
+  ROLE_GROUPS,
+};
