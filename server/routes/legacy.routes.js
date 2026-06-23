@@ -2280,29 +2280,32 @@ async function createParentAlertLog(recordId, alertStatus, channel, userName) {
       attendance_sessions.startTime
      FROM attendance_records
      INNER JOIN students ON students.id = attendance_records.student_id
+       AND students.tenant_id = attendance_records.tenant_id
      INNER JOIN attendance_sessions ON attendance_sessions.id = attendance_records.session_id
-     WHERE attendance_records.id = ?`,
+       AND attendance_sessions.tenant_id = attendance_records.tenant_id
+     WHERE attendance_records.id = ?
+       AND attendance_records.deletedAt IS NULL`,
     [recordId]
   );
   if (!row) return null;
   const message = attendanceAlertMessage(row, row);
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO parent_alert_logs (student_id, attendance_record_id, alertType, channel, message, status, sentAt, delivery, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [row.student_id, recordId, row.status, channel || 'WhatsApp', message, alertStatus, now, alertStatus === 'Sent' ? 'Delivered' : alertStatus, now]
+    `INSERT INTO parent_alert_logs (tenant_id, student_id, attendance_record_id, alertType, channel, message, status, sentAt, delivery, createdBy, createdAt, updatedAt, deletedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [row.tenant_id, row.student_id, recordId, row.status, channel || 'WhatsApp', message, alertStatus, now, alertStatus === 'Sent' ? 'Delivered' : alertStatus, userName || 'system', now, now, null]
   );
-  return get(`SELECT * FROM parent_alert_logs WHERE id = ?`, [result.lastID]);
+  return get(`SELECT * FROM parent_alert_logs WHERE id = ? AND tenant_id = ?`, [result.lastID, row.tenant_id]);
 }
 
-async function queueAutomation({ automationType, targetType, targetId, referenceType, referenceId, sentVia = 'WhatsApp', message }) {
+async function queueAutomation({ tenantId, createdBy = 'system', automationType, targetType, targetId, referenceType, referenceId, sentVia = 'WhatsApp', message }) {
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO automation_logs (automationType, targetType, targetId, referenceType, referenceId, sentVia, message, status, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [automationType, targetType, targetId || null, referenceType || null, referenceId || null, sentVia, message, 'Queued', now]
+    `INSERT INTO automation_logs (tenant_id, automationType, targetType, targetId, referenceType, referenceId, sentVia, message, status, createdBy, createdAt, updatedAt, deletedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [tenantId, automationType, targetType, targetId || null, referenceType || null, referenceId || null, sentVia, message, 'Queued', createdBy, now, now, null]
   );
-  return get(`SELECT * FROM automation_logs WHERE id = ?`, [result.lastID]);
+  return get(`SELECT * FROM automation_logs WHERE id = ? AND tenant_id = ?`, [result.lastID, tenantId]);
 }
 
 function normalizeAttendanceRecord(row) {
@@ -2481,35 +2484,38 @@ router.post('/api/attendance/sessions/:id/mark-all-present', authMiddleware, req
 
 router.post('/api/attendance/records/:id/alert', authMiddleware, requireTenant, async (req, res) => {
   const { alertStatus = 'Sent', channel = 'WhatsApp' } = req.body;
-  const record = await get(`SELECT * FROM attendance_records WHERE id = ?`, [req.params.id]);
+  const record = await get(`SELECT * FROM attendance_records WHERE id = ? AND tenant_id = ? AND deletedAt IS NULL`, [req.params.id, currentTenantId(req)]);
   if (!record) return res.status(404).json({ error: 'Attendance record not found' });
-  await run(`UPDATE attendance_records SET alertStatus = ?, updatedAt = ? WHERE id = ?`, [alertStatus, new Date().toISOString(), req.params.id]);
+  await run(`UPDATE attendance_records SET alertStatus = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`, [alertStatus, new Date().toISOString(), req.params.id, currentTenantId(req)]);
   const log = await createParentAlertLog(req.params.id, alertStatus, channel, req.user.username);
   res.json({ ok: true, log });
 });
 
 router.delete('/api/attendance/sessions/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  const records = await all(`SELECT id FROM attendance_records WHERE session_id = ?`, [req.params.id]);
+  const records = await all(`SELECT id FROM attendance_records WHERE session_id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   for (const record of records) {
-    await run(`DELETE FROM parent_alert_logs WHERE attendance_record_id = ?`, [record.id]);
-    await run(`DELETE FROM parent_call_logs WHERE attendance_record_id = ?`, [record.id]);
-    await run(`DELETE FROM attendance_correction_requests WHERE record_id = ?`, [record.id]);
+    await run(`UPDATE parent_alert_logs SET deletedAt = ?, updatedAt = ? WHERE attendance_record_id = ? AND tenant_id = ?`, [new Date().toISOString(), new Date().toISOString(), record.id, currentTenantId(req)]);
+    await run(`UPDATE parent_call_logs SET deletedAt = ?, updatedAt = ? WHERE attendance_record_id = ? AND tenant_id = ?`, [new Date().toISOString(), new Date().toISOString(), record.id, currentTenantId(req)]);
+    await run(`UPDATE attendance_correction_requests SET deletedAt = ?, updatedAt = ? WHERE record_id = ? AND tenant_id = ?`, [new Date().toISOString(), new Date().toISOString(), record.id, currentTenantId(req)]);
   }
-  await run(`DELETE FROM attendance_records WHERE session_id = ?`, [req.params.id]);
-  await run(`DELETE FROM attendance_sessions WHERE id = ?`, [req.params.id]);
+  await run(`UPDATE attendance_records SET deletedAt = ?, updatedAt = ? WHERE session_id = ? AND tenant_id = ?`, [new Date().toISOString(), new Date().toISOString(), req.params.id, currentTenantId(req)]);
+  await run(`UPDATE attendance_sessions SET deletedAt = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`, [new Date().toISOString(), new Date().toISOString(), req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.get('/api/attendance/dashboard', authMiddleware, requireTenant, async (req, res) => {
   const date = req.query.date || new Date().toISOString().slice(0, 10);
-  const sessions = await attendanceSessionsBase();
+  const sessions = await attendanceSessionsBase(currentTenantId(req));
   const todaySessions = sessions.filter((session) => session.date === date);
   const records = await all(
     `SELECT attendance_records.*, attendance_sessions.batch, attendance_sessions.subject
      FROM attendance_records
      INNER JOIN attendance_sessions ON attendance_sessions.id = attendance_records.session_id
-     WHERE attendance_sessions.date = ?`,
-    [date]
+     WHERE attendance_sessions.date = ?
+       AND attendance_sessions.tenant_id = ?
+       AND attendance_records.tenant_id = attendance_sessions.tenant_id
+       AND attendance_records.deletedAt IS NULL`,
+    [date, currentTenantId(req)]
   );
   const batchStats = {};
   records.forEach((record) => {
@@ -2547,10 +2553,14 @@ router.get('/api/attendance/reports', authMiddleware, requireTenant, async (req,
       attendance_sessions.date
      FROM attendance_records
      INNER JOIN students ON students.id = attendance_records.student_id
+       AND students.tenant_id = attendance_records.tenant_id
      INNER JOIN attendance_sessions ON attendance_sessions.id = attendance_records.session_id
+       AND attendance_sessions.tenant_id = attendance_records.tenant_id
      WHERE attendance_sessions.date LIKE ?
+       AND attendance_records.tenant_id = ?
+       AND attendance_records.deletedAt IS NULL
      ORDER BY attendance_sessions.date DESC, students.name ASC`,
-    [`${month}%`]
+    [`${month}%`, currentTenantId(req)]
   );
   const today = new Date().toISOString().slice(0, 10);
   const dailyAbsent = allRows
@@ -2625,9 +2635,13 @@ router.get('/api/attendance/reports', authMiddleware, requireTenant, async (req,
       SUM(CASE WHEN attendance_records.status IN ('Present', 'Late', 'Excused') THEN 1 ELSE 0 END) AS attendedRows
      FROM attendance_sessions
      LEFT JOIN attendance_records ON attendance_records.session_id = attendance_sessions.id
+       AND attendance_records.tenant_id = attendance_sessions.tenant_id
+       AND attendance_records.deletedAt IS NULL
      WHERE attendance_sessions.date LIKE ?
+       AND attendance_sessions.tenant_id = ?
+       AND attendance_sessions.deletedAt IS NULL
      GROUP BY attendance_sessions.id, attendance_sessions.teacherName, attendance_sessions.subject, attendance_sessions.status`,
-    [`${month}%`]
+    [`${month}%`, currentTenantId(req)]
   );
   const teacherWise = Object.values(teacherSessions.reduce((acc, row) => {
     const key = `${row.teacherName || 'Unassigned'}-${row.subject || 'Subject'}`;
@@ -2651,10 +2665,14 @@ router.get('/api/attendance/reports', authMiddleware, requireTenant, async (req,
       attendance_records.status AS attendanceStatus
      FROM parent_alert_logs
      INNER JOIN students ON students.id = parent_alert_logs.student_id
+       AND students.tenant_id = parent_alert_logs.tenant_id
      LEFT JOIN attendance_records ON attendance_records.id = parent_alert_logs.attendance_record_id
+       AND attendance_records.tenant_id = parent_alert_logs.tenant_id
      WHERE parent_alert_logs.sentAt LIKE ?
+       AND parent_alert_logs.tenant_id = ?
+       AND parent_alert_logs.deletedAt IS NULL
      ORDER BY parent_alert_logs.sentAt DESC`,
-    [`${month}%`]
+    [`${month}%`, currentTenantId(req)]
   );
 
   res.json({
@@ -2682,9 +2700,14 @@ router.get('/api/attendance/parent-alert-logs', authMiddleware, requireTenant, a
       attendance_records.status AS attendanceStatus
      FROM parent_alert_logs
      INNER JOIN students ON students.id = parent_alert_logs.student_id
+       AND students.tenant_id = parent_alert_logs.tenant_id
      LEFT JOIN attendance_records ON attendance_records.id = parent_alert_logs.attendance_record_id
+       AND attendance_records.tenant_id = parent_alert_logs.tenant_id
+     WHERE parent_alert_logs.tenant_id = ?
+       AND parent_alert_logs.deletedAt IS NULL
      ORDER BY parent_alert_logs.sentAt DESC, parent_alert_logs.id DESC
-     LIMIT 100`
+     LIMIT 100`,
+    [currentTenantId(req)]
   );
   res.json(rows.map((row) => ({
     ...row,
@@ -2698,11 +2721,11 @@ router.post('/api/attendance/parent-call-logs', authMiddleware, requireTenant, a
   if (validationError) return res.status(400).json({ error: validationError });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO parent_call_logs (student_id, attendance_record_id, parentPhone, callOutcome, calledBy, calledAt, followUpDate, notes, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [student_id, attendance_record_id || null, parentPhone || null, callOutcome, req.user.username, now, followUpDate || null, notes || null, now]
+    `INSERT INTO parent_call_logs (tenant_id, student_id, attendance_record_id, parentPhone, callOutcome, calledBy, calledAt, followUpDate, notes, createdBy, createdAt, updatedAt, deletedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), student_id, attendance_record_id || null, parentPhone || null, callOutcome, req.user.username, now, followUpDate || null, notes || null, req.user.id || req.user.username, now, now, null]
   );
-  res.json(await get(`SELECT * FROM parent_call_logs WHERE id = ?`, [result.lastID]));
+  res.json(await get(`SELECT * FROM parent_call_logs WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]));
 });
 
 router.get('/api/attendance/parent-call-logs', authMiddleware, requireTenant, async (req, res) => {
@@ -2712,8 +2735,12 @@ router.get('/api/attendance/parent-call-logs', authMiddleware, requireTenant, as
       students.name AS studentName
      FROM parent_call_logs
      INNER JOIN students ON students.id = parent_call_logs.student_id
+       AND students.tenant_id = parent_call_logs.tenant_id
+     WHERE parent_call_logs.tenant_id = ?
+       AND parent_call_logs.deletedAt IS NULL
      ORDER BY parent_call_logs.calledAt DESC, parent_call_logs.id DESC
-     LIMIT 100`
+     LIMIT 100`,
+    [currentTenantId(req)]
   );
   res.json(rows);
 });
@@ -2882,15 +2909,21 @@ router.post('/api/automation/attendance', authMiddleware, requireTenant, async (
       COUNT(attendance_records.id) AS absentCount
      FROM attendance_records
      INNER JOIN attendance_sessions ON attendance_sessions.id = attendance_records.session_id
+       AND attendance_sessions.tenant_id = attendance_records.tenant_id
      INNER JOIN students ON students.id = attendance_records.student_id
-     WHERE attendance_sessions.date LIKE ? AND attendance_records.status = 'Absent'
+       AND students.tenant_id = attendance_records.tenant_id
+     WHERE attendance_sessions.date LIKE ?
+       AND attendance_records.status = 'Absent'
+       AND attendance_records.tenant_id = ?
      GROUP BY students.id, students.name, students.data
      HAVING COUNT(attendance_records.id) >= 3`,
-    [`${month}%`]
+    [`${month}%`, currentTenantId(req)]
   );
   const absenteeAlerts = [];
   for (const row of absentRows) {
     absenteeAlerts.push(await queueAutomation({
+      tenantId: currentTenantId(req),
+      createdBy: req.user.id || req.user.username,
       automationType: 'Repeated Absentee Alert',
       targetType: 'Student',
       targetId: row.studentId,
@@ -2901,10 +2934,12 @@ router.post('/api/automation/attendance', authMiddleware, requireTenant, async (
     }));
   }
 
-  const lateRows = await all(`SELECT * FROM staff_attendance_records WHERE date = ? AND status IN ('Late', 'Half Day', 'Admin Approval Required')`, [today]);
+  const lateRows = await all(`SELECT * FROM staff_attendance_records WHERE date = ? AND tenant_id = ? AND status IN ('Late', 'Half Day', 'Admin Approval Required')`, [today, currentTenantId(req)]);
   const teacherLateAlerts = [];
   for (const row of lateRows) {
     teacherLateAlerts.push(await queueAutomation({
+      tenantId: currentTenantId(req),
+      createdBy: req.user.id || req.user.username,
       automationType: 'Teacher Late Alert',
       targetType: 'Staff',
       targetId: row.staff_id || row.staffId,

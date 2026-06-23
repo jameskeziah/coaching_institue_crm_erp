@@ -5,6 +5,7 @@ const { migrate } = require('./db');
 
 const authRoutes = require('./routes/auth.routes');
 const usersRoutes = require('./routes/users.routes');
+const invitesRoutes = require('./routes/invites.routes');
 const admissionsRoutes = require('./routes/admissions.routes');
 const studentsRoutes = require('./routes/students.routes');
 const legacyRoutes = require('./routes/legacy.routes');
@@ -24,6 +25,7 @@ app.get('/api/health', (req, res) => {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/users', usersRoutes);
+app.use('/api/invites', invitesRoutes);
 app.use('/api/admissions', admissionsRoutes);
 app.use('/api/students', studentsRoutes);
 

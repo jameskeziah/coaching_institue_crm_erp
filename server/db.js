@@ -588,6 +588,61 @@ async function createTables() {
   );
 
   await run(
+    `CREATE TABLE IF NOT EXISTS user_sessions (
+      id TEXT PRIMARY KEY,
+      user_id ${integerType} NOT NULL,
+      tenant_id ${integerType} NOT NULL,
+      refresh_token_hash TEXT NOT NULL,
+      user_agent TEXT,
+      ip_address TEXT,
+      expires_at TEXT NOT NULL,
+      revoked_at TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id TEXT PRIMARY KEY,
+      user_id ${integerType} NOT NULL,
+      tenant_id ${integerType} NOT NULL,
+      token_hash TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS email_verification_tokens (
+      id TEXT PRIMARY KEY,
+      user_id ${integerType} NOT NULL,
+      tenant_id ${integerType} NOT NULL,
+      token_hash TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS user_invites (
+      id TEXT PRIMARY KEY,
+      tenant_id ${integerType} NOT NULL,
+      email TEXT NOT NULL,
+      role TEXT NOT NULL,
+      token_hash TEXT NOT NULL,
+      invited_by ${integerType} NOT NULL,
+      accepted_at TEXT,
+      revoked_at TEXT,
+      expires_at TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(
     `CREATE TABLE IF NOT EXISTS teachers (
       id ${idColumn},
       tenant_id ${integerType},
@@ -1822,6 +1877,28 @@ async function migrateFollowUpColumns() {
   await addColumnIfMissing('follow_up_tasks', 'escalationCount', 'INTEGER DEFAULT 0');
 }
 
+async function migrateAuthColumns() {
+  await addColumnIfMissing('users', 'name', 'TEXT');
+  await addColumnIfMissing('users', 'email', 'TEXT');
+  await addColumnIfMissing('users', 'password_hash', 'TEXT');
+  await addColumnIfMissing('users', 'email_verified_at', 'TEXT');
+  await addColumnIfMissing('users', 'password_changed_at', 'TEXT');
+  await addColumnIfMissing('users', 'last_login_at', 'TEXT');
+  await addColumnIfMissing('users', 'is_active', 'INTEGER DEFAULT 1');
+  await addColumnIfMissing('users', 'created_by', 'TEXT');
+  await addColumnIfMissing('users', 'created_at', 'TEXT');
+  await addColumnIfMissing('users', 'updated_at', 'TEXT');
+  await addColumnIfMissing('users', 'deleted_at', 'TEXT');
+
+  await run(`UPDATE users SET email = COALESCE(email, username) WHERE email IS NULL`);
+  await run(`UPDATE users SET name = COALESCE(name, username) WHERE name IS NULL`);
+  await run(`UPDATE users SET password_hash = COALESCE(password_hash, password) WHERE password_hash IS NULL`);
+  await run(`UPDATE users SET is_active = 1 WHERE is_active IS NULL`);
+  await run(`UPDATE users SET email_verified_at = CURRENT_TIMESTAMP WHERE email_verified_at IS NULL AND password IS NOT NULL AND created_at IS NULL`);
+  await run(`UPDATE users SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL`);
+  await run(`UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL`);
+}
+
 async function ensureDefaultTenant() {
   const now = new Date().toISOString();
   let tenant = await get(`SELECT * FROM tenants WHERE slug = ?`, ['miraku']);
@@ -1979,6 +2056,14 @@ async function migrateTenantIndexes() {
     const indexName = `idx_${table}_tenant_${columns.split(',')[0].replace(/[^a-zA-Z0-9_]/g, '')}`;
     await run(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${table} (${columns})`);
   }
+
+  await run(`CREATE INDEX IF NOT EXISTS idx_users_tenant_email ON users (tenant_id, email)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions (user_id, tenant_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_user_sessions_refresh_hash ON user_sessions (refresh_token_hash)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_hash ON password_reset_tokens (token_hash)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_email_verification_tokens_hash ON email_verification_tokens (token_hash)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_user_invites_token ON user_invites (token_hash)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_user_invites_tenant_email ON user_invites (tenant_id, email)`);
 }
 
 async function seedAdmin() {
@@ -2103,6 +2188,7 @@ async function migrate() {
   await migrateExpenseColumns();
   await migrateAttendanceColumns();
   await migrateFollowUpColumns();
+  await migrateAuthColumns();
   await migrateTenantColumns();
   await migrateOperationalTenantColumns();
   await migrateBusinessTenantMetadataColumns();

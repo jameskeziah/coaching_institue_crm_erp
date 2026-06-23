@@ -36,6 +36,33 @@ const envSchema = z.object({
   DATABASE_SSL: booleanStringSchema,
   APP_URL: z.string().url('APP_URL must be a valid URL'),
   API_URL: z.string().url('API_URL must be a valid URL'),
+  JWT_ACCESS_EXPIRES_IN: z.string().default('15m'),
+  REFRESH_TOKEN_DAYS: z
+    .string()
+    .regex(/^\d+$/, 'REFRESH_TOKEN_DAYS must be a number')
+    .transform(Number)
+    .default('30'),
+  RESET_PASSWORD_TOKEN_MINUTES: z
+    .string()
+    .regex(/^\d+$/, 'RESET_PASSWORD_TOKEN_MINUTES must be a number')
+    .transform(Number)
+    .default('30'),
+  EMAIL_VERIFICATION_TOKEN_HOURS: z
+    .string()
+    .regex(/^\d+$/, 'EMAIL_VERIFICATION_TOKEN_HOURS must be a number')
+    .transform(Number)
+    .default('24'),
+  INVITE_TOKEN_DAYS: z
+    .string()
+    .regex(/^\d+$/, 'INVITE_TOKEN_DAYS must be a number')
+    .transform(Number)
+    .default('7'),
+  TENANT_BOOTSTRAP_SECRET: z.string().optional(),
+  MAIL_FROM: z.string().email().optional(),
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.string().optional(),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
   ALLOW_REGISTRATION: optionalBooleanStringSchema,
   ADMIN_USERNAME: z.string().optional(),
   ADMIN_PASSWORD: z.string().optional(),
@@ -67,6 +94,12 @@ const productionRequiredVariables = [
   'WHATSAPP_API_VERSION',
   'RAZORPAY_KEY_ID',
   'RAZORPAY_KEY_SECRET',
+  'TENANT_BOOTSTRAP_SECRET',
+  'MAIL_FROM',
+  'SMTP_HOST',
+  'SMTP_PORT',
+  'SMTP_USER',
+  'SMTP_PASS',
 ];
 
 const isMissing = (key) => !process.env[key] || process.env[key].trim() === '';
