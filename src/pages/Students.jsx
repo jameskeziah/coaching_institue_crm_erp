@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { completeFollowUp, createFollowUp, createStudent, createStudentHistory, deleteStudent, deleteStudentHistory, fetchFeePlans, fetchStudent360, fetchStudentFeePlans, fetchStudentHistory, fetchStudents, updateStudent } from '../api';
+import { completeFollowUp, createFollowUp, createStudent, createStudentHistory, deleteStudent, deleteStudentHistory, fetchBatches, fetchBranches, fetchCourses, fetchFeePlans, fetchStudent360, fetchStudentFeePlans, fetchStudentHistory, fetchStudents, updateStudent } from '../api';
 import { useAuth } from '../AuthContext';
 import { PageShell } from '@/components/page-shell';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -19,11 +19,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 
-const courses = ['JEE', 'NEET', 'MHT-CET', 'Foundation', 'AI Lab'];
 const classes = ['6th', '7th', '8th', '9th', '10th', '11th', '12th', 'Repeater'];
-const batches = ['Morning', 'Evening', 'Weekend', 'Vacation'];
 const academicYears = ['2026-27', '2027-28', '2028-29'];
-const branches = ['Tembhurni', 'Kurduvadi', 'Future Branch'];
 const statuses = ['Enquiry', 'Admitted', 'Active', 'Inactive', 'Dropout', 'Completed'];
 const historyTypes = ['Test', 'Complaint', 'Parent Meeting', 'Attendance', 'Fee', 'Note'];
 const followUpTypes = ['Fee Payment Promise', 'Parent Call Follow-up', 'Attendance Risk', 'Test Result Remedial', 'Admission Follow-up', 'Complaint Resolution'];
@@ -55,6 +52,9 @@ function emptyStudentForm() {
     grade: '',
     batch: 'Morning',
     attendance: '',
+    branchId: '',
+    primaryCourseId: '',
+    primaryBatchId: '',
     data: {
       status: 'Enquiry',
       school: '',
@@ -89,6 +89,9 @@ function normalizeStudentForForm(student) {
     grade: student?.grade || '',
     batch: student?.batch || '',
     attendance: student?.attendance || '',
+    branchId: student?.branch_id || student?.branchId || '',
+    primaryCourseId: student?.primary_course_id || student?.primaryCourseId || '',
+    primaryBatchId: student?.primary_batch_id || student?.primaryBatchId || '',
     data: {
       ...base.data,
       ...(student?.data || {}),
@@ -104,6 +107,9 @@ export default function Students() {
   const { permissions } = useAuth();
   const { canDelete } = permissions;
   const [students, setStudents] = useState([]);
+  const [branchMasters, setBranchMasters] = useState([]);
+  const [courseMasters, setCourseMasters] = useState([]);
+  const [batchMasters, setBatchMasters] = useState([]);
   const [allFeePlans, setAllFeePlans] = useState([]);
   const [selectedId, setSelectedId] = useState('');
   const [form, setForm] = useState(emptyStudentForm);
@@ -187,12 +193,18 @@ export default function Students() {
   async function loadStudents(preferredId = selectedId) {
     setError('');
     try {
-      const [rows, feeRows] = await Promise.all([
+      const [rows, feeRows, branchRows, courseRows, batchRows] = await Promise.all([
         fetchStudents(),
         fetchFeePlans().catch(() => []),
+        fetchBranches(),
+        fetchCourses(),
+        fetchBatches(),
       ]);
       setStudents(rows);
       setAllFeePlans(feeRows);
+      setBranchMasters(branchRows);
+      setCourseMasters(courseRows);
+      setBatchMasters(batchRows);
       const next = rows.find((student) => String(student.id) === String(preferredId)) || rows[0];
       if (next) {
         setSelectedId(String(next.id));
@@ -450,11 +462,11 @@ export default function Students() {
         <CardContent>
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name, phone, school, target" />
-            <FilterSelect value={filters.course} onChange={(value) => updateFilter('course', value)} options={courses} label="Course" />
+            <FilterSelect value={filters.course} onChange={(value) => updateFilter('course', value)} options={courseMasters.map((item) => item.name)} label="Course" />
             <FilterSelect value={filters.grade} onChange={(value) => updateFilter('grade', value)} options={classes} label="Class" />
-            <FilterSelect value={filters.batch} onChange={(value) => updateFilter('batch', value)} options={batches} label="Batch" />
+            <FilterSelect value={filters.batch} onChange={(value) => updateFilter('batch', value)} options={batchMasters.map((item) => item.name)} label="Batch" />
             <FilterSelect value={filters.status} onChange={(value) => updateFilter('status', value)} options={statuses} label="Status" />
-            <FilterSelect value={filters.branch} onChange={(value) => updateFilter('branch', value)} options={branches} label="Branch" />
+            <FilterSelect value={filters.branch} onChange={(value) => updateFilter('branch', value)} options={branchMasters.map((item) => item.name)} label="Branch" />
             <FilterSelect value={filters.fee} onChange={(value) => updateFilter('fee', value)} options={['Pending', 'Paid']} label="Fee" />
             <FilterSelect value={filters.attendance} onChange={(value) => updateFilter('attendance', value)} options={['Risk', 'Healthy']} label="Attendance" />
           </div>
@@ -519,8 +531,12 @@ export default function Students() {
               </label>
               <label className="text-sm">
                 <span className="font-medium text-slate-700">Course</span>
-                <select value={form.data.course} onChange={(e) => updateData('course', e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2 text-sm">
-                  {courses.map((course) => <option key={course}>{course}</option>)}
+                <select value={form.primaryCourseId} onChange={(e) => {
+                  const course = courseMasters.find((item) => String(item.id) === e.target.value);
+                  setForm((current) => ({ ...current, primaryCourseId: e.target.value, primaryBatchId: '', grade: course?.classLevel || current.grade, data: { ...current.data, course: course?.name || '' } }));
+                }} className="mt-1 w-full rounded-md border px-3 py-2 text-sm" required>
+                  <option value="">Select course</option>
+                  {courseMasters.filter((course) => course.isActive).map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}
                 </select>
               </label>
               <label className="text-sm">
@@ -532,8 +548,15 @@ export default function Students() {
               </label>
               <label className="text-sm">
                 <span className="font-medium text-slate-700">Batch</span>
-                <select value={form.batch} onChange={(e) => updateField('batch', e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2 text-sm">
-                  {batches.map((batch) => <option key={batch}>{batch}</option>)}
+                <select value={form.primaryBatchId} onChange={(e) => {
+                  const selectedBatch = batchMasters.find((item) => String(item.id) === e.target.value);
+                  setForm((current) => ({ ...current, primaryBatchId: e.target.value, batch: selectedBatch?.name || '' }));
+                }} className="mt-1 w-full rounded-md border px-3 py-2 text-sm" required>
+                  <option value="">Select batch</option>
+                  {batchMasters.filter((batch) => batch.status === 'ACTIVE'
+                    && (!form.branchId || String(batch.branchId) === String(form.branchId))
+                    && (!form.primaryCourseId || String(batch.courseId) === String(form.primaryCourseId)))
+                    .map((batch) => <option key={batch.id} value={batch.id}>{batch.name}</option>)}
                 </select>
               </label>
               <label className="text-sm">
@@ -544,8 +567,12 @@ export default function Students() {
               </label>
               <label className="text-sm">
                 <span className="font-medium text-slate-700">Branch</span>
-                <select value={form.data.branch} onChange={(e) => updateData('branch', e.target.value)} className="mt-1 w-full rounded-md border px-3 py-2 text-sm">
-                  {branches.map((branch) => <option key={branch}>{branch}</option>)}
+                <select value={form.branchId} onChange={(e) => {
+                  const branch = branchMasters.find((item) => String(item.id) === e.target.value);
+                  setForm((current) => ({ ...current, branchId: e.target.value, primaryBatchId: '', data: { ...current.data, branch: branch?.name || '' } }));
+                }} className="mt-1 w-full rounded-md border px-3 py-2 text-sm" required>
+                  <option value="">Select branch</option>
+                  {branchMasters.filter((branch) => branch.isActive).map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
                 </select>
               </label>
               <input value={form.data.school} onChange={(e) => updateData('school', e.target.value)} placeholder="School" className="rounded-md border px-3 py-2 text-sm" />

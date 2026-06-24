@@ -6,6 +6,9 @@ import {
   createStudent,
   deleteAdmission,
   fetchAdmissions,
+  fetchBatches,
+  fetchBranches,
+  fetchCourses,
   fetchFeeStructures,
   getCounsellors,
   getLeadActivities,
@@ -51,7 +54,7 @@ function defaultForm() {
     school: '',
     courseInterested: '',
     targetExam: '',
-    branchId: 'Tembhurni',
+    branchId: '',
     source: '',
     subSource: '',
     campaign: '',
@@ -110,7 +113,7 @@ function formFromEntry(entry) {
     school: entry.school || data.school || '',
     courseInterested: entry.courseInterested || entry.program || '',
     targetExam: entry.targetExam || '',
-    branchId: entry.branchId || data.branch || 'Tembhurni',
+    branchId: entry.branchId || '',
     source: entry.source || '',
     subSource: entry.subSource || '',
     campaign: entry.campaign || '',
@@ -166,6 +169,9 @@ export default function Admissions() {
   const { isAdmin } = useAuth();
   const [items, setItems] = useState([]);
   const [feeStructures, setFeeStructures] = useState([]);
+  const [branches, setBranches] = useState([]);
+  const [courses, setCourses] = useState([]);
+  const [batches, setBatches] = useState([]);
   const [counsellors, setCounsellors] = useState([]);
   const [form, setForm] = useState(defaultForm());
   const [editingId, setEditingId] = useState(null);
@@ -183,7 +189,9 @@ export default function Admissions() {
     setLoading(true);
     setError('');
     try {
-      const [admissionRows, structureRows, counsellorRows] = await Promise.all([fetchAdmissions(), fetchFeeStructures(), getCounsellors()]);
+      const [admissionRows, structureRows, counsellorRows, branchRows, courseRows, batchRows] = await Promise.all([
+        fetchAdmissions(), fetchFeeStructures(), getCounsellors(), fetchBranches(), fetchCourses(), fetchBatches(),
+      ]);
       const normalizedRows = admissionRows.map((item) => ({
         ...item,
         status: normalizeStatus(item.status),
@@ -192,6 +200,9 @@ export default function Admissions() {
       setItems(normalizedRows);
       setFeeStructures(structureRows.filter((row) => row.status !== 'Inactive'));
       setCounsellors(counsellorRows.data || []);
+      setBranches(branchRows);
+      setCourses(courseRows);
+      setBatches(batchRows);
       setSelectedLeadId((current) => {
         if (current && normalizedRows.some((row) => String(row.id) === String(current))) return current;
         return normalizedRows[0]?.id || null;
@@ -343,16 +354,36 @@ export default function Admissions() {
       const structure = feeStructures.find((item) => String(item.id) === String(selectedFeeStructureId))
         || feeStructures.find((item) => item.courseName === entry.courseInterested)
         || feeStructures[0];
+      const branch = branches.find((item) => String(item.id) === String(entry.branchId))
+        || branches.find((item) => item.name === entry.branchId || item.code === entry.branchId);
+      const course = courses.find((item) => item.name === entry.courseInterested)
+        || courses.find((item) => String(item.classLevel || '') === String(entry.className || ''));
+      const batch = batches.find((item) => String(item.branchId) === String(branch?.id)
+        && String(item.courseId) === String(course?.id)
+        && item.status === 'ACTIVE');
+      if (!branch || !course || !batch) {
+        throw new Error('Set up an active branch, course, and matching batch before converting this lead');
+      }
       const student = await createStudent({
         name: entry.studentName || entry.name,
         grade: entry.className || '',
-        batch: entry.courseInterested || '',
+        batch: batch.name,
         attendance: '',
+        branchId: branch.id,
+        primaryCourseId: course.id,
+        primaryBatchId: batch.id,
+        parentName: entry.parentName || '',
+        parentPhone: entry.parentPhone || '',
+        schoolName: entry.school || '',
+        admissionId: entry.id,
+        convertedFromLeadId: entry.id,
+        status: 'ACTIVE',
         data: {
           primaryPhone: entry.parentPhone || '',
           whatsapp: entry.parentPhone || '',
           school: entry.school || '',
-          branch: entry.branchId || 'Tembhurni',
+          branch: branch.name,
+          course: course.name,
           academicYear: entry.data?.academicYear || '2026-27',
           admissionSource: entry.source || '',
           admissionLeadId: entry.id,
@@ -456,14 +487,20 @@ export default function Admissions() {
             <input value={form.studentName} onChange={(e) => updateField('studentName', e.target.value)} placeholder="Student name" className="rounded-md border px-3 py-2 text-sm" required />
             <input value={form.parentName} onChange={(e) => updateField('parentName', e.target.value)} placeholder="Parent name" className="rounded-md border px-3 py-2 text-sm" />
             <input value={form.parentPhone} onChange={(e) => updateField('parentPhone', e.target.value)} placeholder="Parent phone / WhatsApp" className="rounded-md border px-3 py-2 text-sm" required />
-            <input value={form.courseInterested} onChange={(e) => updateField('courseInterested', e.target.value)} placeholder="Course interested" className="rounded-md border px-3 py-2 text-sm" required />
+            <select value={form.courseInterested} onChange={(e) => updateField('courseInterested', e.target.value)} className="rounded-md border px-3 py-2 text-sm" required>
+              <option value="">Course interested</option>
+              {courses.filter((course) => course.isActive).map((course) => <option key={course.id} value={course.name}>{course.name}</option>)}
+            </select>
             <div className="grid grid-cols-2 gap-3">
               <input value={form.className} onChange={(e) => updateField('className', e.target.value)} placeholder="Class" className="rounded-md border px-3 py-2 text-sm" required />
               <input value={form.targetExam} onChange={(e) => updateField('targetExam', e.target.value)} placeholder="Target exam" className="rounded-md border px-3 py-2 text-sm" />
             </div>
             <input value={form.school} onChange={(e) => updateField('school', e.target.value)} placeholder="School" className="rounded-md border px-3 py-2 text-sm" />
             <div className="grid grid-cols-2 gap-3">
-              <input value={form.branchId} onChange={(e) => updateField('branchId', e.target.value)} placeholder="Branch" className="rounded-md border px-3 py-2 text-sm" />
+              <select value={form.branchId} onChange={(e) => updateField('branchId', e.target.value)} className="rounded-md border px-3 py-2 text-sm">
+                <option value="">Select branch</option>
+                {branches.filter((branch) => branch.isActive).map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
+              </select>
               <input value={form.customFields.academicYear} onChange={(e) => updateCustomField('academicYear', e.target.value)} placeholder="Academic year" className="rounded-md border px-3 py-2 text-sm" />
             </div>
             <div className="grid grid-cols-2 gap-3">

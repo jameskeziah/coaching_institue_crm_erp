@@ -33,6 +33,7 @@ import RevenuePage from './pages/super-admin/RevenuePage';
 import UsagePage from './pages/super-admin/UsagePage';
 import SupportAccessPage from './pages/super-admin/SupportAccessPage';
 import AuditLogsPage from './pages/super-admin/AuditLogsPage';
+import { BatchDetailPage, BatchesPage, BranchesPage, CoursesPage, SubjectsPage } from './pages/AcademicMasters';
 
 function ModuleRoute({ moduleName, children }) {
   const { canAccess } = useAuth();
@@ -63,6 +64,11 @@ function AppRoutes() {
         <Route path="/admissions" element={<ModuleRoute moduleName="admissions"><Admissions /></ModuleRoute>} />
         <Route path="/attendance" element={<ModuleRoute moduleName="attendance"><Attendance /></ModuleRoute>} />
         <Route path="/academic" element={<ModuleRoute moduleName="academic"><Academic /></ModuleRoute>} />
+        <Route path="/academic/batches" element={<ModuleRoute moduleName="academicMasters"><BatchesPage /></ModuleRoute>} />
+        <Route path="/academic/batches/:id" element={<ModuleRoute moduleName="academicMasters"><BatchDetailPage /></ModuleRoute>} />
+        <Route path="/settings/branches" element={<ModuleRoute moduleName="academicMasters"><BranchesPage /></ModuleRoute>} />
+        <Route path="/settings/courses" element={<ModuleRoute moduleName="academicMasters"><CoursesPage /></ModuleRoute>} />
+        <Route path="/settings/subjects" element={<ModuleRoute moduleName="academicMasters"><SubjectsPage /></ModuleRoute>} />
         <Route path="/test-performance" element={<ModuleRoute moduleName="tests"><TestPerformance /></ModuleRoute>} />
         <Route path="/automation" element={<ModuleRoute moduleName="automation"><Automation /></ModuleRoute>} />
         <Route path="/ai-lab" element={<ModuleRoute moduleName="aiLab"><AiLab /></ModuleRoute>} />

@@ -293,6 +293,43 @@ export function deleteStudent(id) {
   return request(`/students/${id}`, { method: 'DELETE' });
 }
 
+function unwrapData(result) {
+  return result?.data ?? result;
+}
+
+export function fetchBranches() { return request('/branches').then(unwrapData); }
+export function createBranch(payload) { return request('/branches', { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function updateBranch(id, payload) { return request(`/branches/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }).then(unwrapData); }
+export function deleteBranch(id) { return request(`/branches/${id}`, { method: 'DELETE' }); }
+export function fetchCourses() { return request('/courses').then(unwrapData); }
+export function createCourse(payload) { return request('/courses', { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function updateCourse(id, payload) { return request(`/courses/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }).then(unwrapData); }
+export function deleteCourse(id) { return request(`/courses/${id}`, { method: 'DELETE' }); }
+export function fetchSubjects() { return request('/subjects').then(unwrapData); }
+export function createSubject(payload) { return request('/subjects', { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function updateSubject(id, payload) { return request(`/subjects/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }).then(unwrapData); }
+export function deleteSubject(id) { return request(`/subjects/${id}`, { method: 'DELETE' }); }
+export function fetchBatches(params = {}) {
+  const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== '' && value !== undefined)).toString();
+  return request(`/batches${query ? `?${query}` : ''}`).then(unwrapData);
+}
+export function fetchBatch(id) { return request(`/batches/${id}`).then(unwrapData); }
+export function createBatch(payload) { return request('/batches', { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function updateBatch(id, payload) { return request(`/batches/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }).then(unwrapData); }
+export function deleteBatch(id) { return request(`/batches/${id}`, { method: 'DELETE' }); }
+export function updateBatchStatus(id, status) { return request(`/batches/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }).then(unwrapData); }
+export function replaceBatchTimings(batchId, timings) { return request(`/batches/${batchId}/timings`, { method: 'PUT', body: JSON.stringify({ timings }) }).then(unwrapData); }
+export function fetchBatchAudit(batchId) { return request(`/batches/${batchId}/audit`).then(unwrapData); }
+export function addBatchStudent(batchId, payload) { return request(`/batches/${batchId}/students`, { method: 'POST', body: JSON.stringify(payload) }); }
+export function removeBatchStudent(batchId, studentId) { return request(`/batches/${batchId}/students/${studentId}`, { method: 'DELETE' }); }
+export function transferBatchStudent(batchId, studentId, payload) { return request(`/batches/${batchId}/students/${studentId}/transfer`, { method: 'POST', body: JSON.stringify(payload) }); }
+export function addBatchTeacher(batchId, payload) { return request(`/batches/${batchId}/teachers`, { method: 'POST', body: JSON.stringify(payload) }); }
+export function removeBatchTeacher(batchId, teacherId, subjectId) {
+  return request(`/batches/${batchId}/teachers/${teacherId}?subjectId=${encodeURIComponent(subjectId)}`, { method: 'DELETE' });
+}
+export function addFacultySubject(facultyId, payload) { return request(`/faculty/${facultyId}/subjects`, { method: 'POST', body: JSON.stringify(payload) }); }
+export function removeFacultySubject(facultyId, subjectId) { return request(`/faculty/${facultyId}/subjects/${subjectId}`, { method: 'DELETE' }); }
+
 export function fetchStudentHistory(studentId) {
   return request(`/students/${studentId}/history`);
 }
@@ -694,6 +731,44 @@ export function createFeePayment(payload) {
 
 export function deleteFeePayment(id) {
   return request(`/fee-payments/${id}`, { method: 'DELETE' });
+}
+
+export function fetchDiscountRequests(params = {}) {
+  const query = new URLSearchParams(
+    Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== '')
+  ).toString();
+  return request(`/discount-requests${query ? `?${query}` : ''}`).then((result) => result.data || []);
+}
+
+export function fetchDiscountRequest(id) {
+  return request(`/discount-requests/${id}`).then((result) => result.data);
+}
+
+export function fetchDiscountAudit(id) {
+  return request(`/discount-requests/${id}/audit`).then((result) => result.data || []);
+}
+
+export function createDiscountRequest(payload) {
+  return request('/discount-requests', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function approveDiscountRequest(id) {
+  return request(`/discount-requests/${id}/approve`, { method: 'PATCH', body: JSON.stringify({}) });
+}
+
+export function rejectDiscountRequest(id, rejectionReason) {
+  return request(`/discount-requests/${id}/reject`, {
+    method: 'PATCH',
+    body: JSON.stringify({ rejectionReason }),
+  });
+}
+
+export function cancelDiscountRequest(id) {
+  return request(`/discount-requests/${id}/cancel`, { method: 'PATCH', body: JSON.stringify({}) });
+}
+
+export function applyDiscountRequest(id) {
+  return request(`/discount-requests/${id}/apply`, { method: 'PATCH', body: JSON.stringify({}) });
 }
 
 export function fetchAttendanceSessions() {

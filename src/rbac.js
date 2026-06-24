@@ -25,6 +25,7 @@ export const moduleRoles = {
   teacherPerformance: ['owner', 'director', 'admin', 'teacher'],
   parentPortal: ['owner', 'director', 'admin', 'counsellor', 'teacher', 'accountant'],
   ontology: ['owner', 'director', 'admin'],
+  academicMasters: ['owner', 'director', 'admin', 'accountant', 'counsellor', 'teacher'],
 };
 
 export function normalizeRole(role) {
@@ -62,4 +63,41 @@ export function canManageUsers(role) {
 
 export function canApproveCorrections(role) {
   return isAdminRole(role);
+}
+
+export function discountPermissions(role) {
+  const normalized = normalizeRole(role);
+  return {
+    canRequestDiscount: ['owner', 'director', 'admin', 'accountant', 'counsellor'].includes(normalized),
+    canViewDiscounts: ['owner', 'director', 'admin', 'accountant', 'counsellor'].includes(normalized),
+    canApproveDiscount: ['owner', 'director', 'admin'].includes(normalized),
+    canRejectDiscount: ['owner', 'director', 'admin'].includes(normalized),
+    canApplyDiscount: ['owner', 'director', 'admin', 'accountant'].includes(normalized),
+    canViewDiscountAudit: ['owner', 'director', 'admin', 'accountant'].includes(normalized),
+  };
+}
+
+export function academicMasterPermissions(role) {
+  const normalized = normalizeRole(role);
+  const canView = ['owner', 'director', 'admin', 'accountant', 'counsellor', 'teacher'].includes(normalized);
+  const canManage = ['owner', 'director', 'admin'].includes(normalized);
+  return {
+    canViewAcademicMasters: canView,
+    canManageBranches: canManage,
+    canManageCourses: canManage,
+    canManageBatches: canManage,
+    canManageSubjects: canManage,
+    canManageBatchStudents: canManage || normalized === 'counsellor',
+    canManageBatchTeachers: canManage,
+    canManageFacultySubjects: canManage,
+    canCreateBatch: canManage,
+    canUpdateBatch: canManage,
+    canActivateBatch: canManage,
+    canDeactivateBatch: canManage,
+    canArchiveBatch: canManage,
+    canViewBatchStudents: canView,
+    canViewBatchTeachers: canView,
+    canViewBatchTimings: canView,
+    canManageBatchTimings: canManage,
+  };
 }

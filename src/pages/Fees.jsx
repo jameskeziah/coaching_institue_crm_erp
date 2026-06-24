@@ -1,7 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Bell, CalendarClock, Copy, CreditCard, FileText, MessageCircle, Pencil, PhoneCall, Plus, Save, Trash2, X } from 'lucide-react';
+import { AlertTriangle, Bell, CalendarClock, Copy, CreditCard, FileText, MessageCircle, Pencil, PhoneCall, Plus, Save, X } from 'lucide-react';
 import {
+  applyDiscountRequest,
+  approveDiscountRequest,
+  cancelDiscountRequest,
   createFollowUp,
+  createDiscountRequest,
   createFeePayment,
   createFeePlan,
   deleteFeePayment,
@@ -12,10 +16,12 @@ import {
   fetchFeeReminders,
   fetchFeeReports,
   fetchFeeStructures,
+  fetchDiscountRequests,
   fetchMessageTemplates,
   fetchStudents,
   fetchWhatsAppStatus,
   markFeeReminderSent,
+  rejectDiscountRequest,
   runFeeReminderAutomation,
   sendWhatsAppTest,
   updateMessageTemplate,
@@ -49,7 +55,6 @@ const defaultCoursePrograms = [
 ];
 const paymentTypes = ['One-Time', 'Installment', 'Monthly', 'Course-wise'];
 const feeCategories = ['Tuition', 'Admission Fee', 'Exam Fee', 'Material Fee', 'Lab Fee', 'Transport', 'Other'];
-const discountTypes = ['', 'Scholarship Discount', 'Sibling Discount', 'Early Admission Discount', 'Management Discount', 'Special Case Discount'];
 const paymentMethods = ['Cash', 'UPI', 'Bank Transfer', 'Cheque', 'Razorpay', 'Partial Payment'];
 const installmentStatuses = ['Pending', 'Paid', 'Overdue'];
 const feeStatuses = ['', 'Not Started', 'Partially Paid', 'Fully Paid', 'Overdue', 'Scholarship', 'Free Student', 'Refund Pending', 'Cancelled Admission'];
@@ -130,8 +135,15 @@ function escapeHtml(value) {
 }
 
 export default function Fees() {
-  const { permissions } = useAuth();
-  const { canDelete, canEditFinance } = permissions;
+  const { permissions, role } = useAuth();
+  const {
+    canDelete,
+    canEditFinance,
+    canRequestDiscount,
+    canApproveDiscount,
+    canRejectDiscount,
+    canApplyDiscount,
+  } = permissions;
   const [students, setStudents] = useState([]);
   const [plans, setPlans] = useState([]);
   const [payments, setPayments] = useState([]);
@@ -139,6 +151,19 @@ export default function Fees() {
   const [reports, setReports] = useState(null);
   const [reminders, setReminders] = useState([]);
   const [auditLogs, setAuditLogs] = useState([]);
+  const [discountRequests, setDiscountRequests] = useState([]);
+  const [discountModalOpen, setDiscountModalOpen] = useState(false);
+  const [discountForm, setDiscountForm] = useState({
+    feeInvoiceId: '',
+    studentId: '',
+    discountType: 'FIXED',
+    discountAmount: '',
+    discountPercent: '',
+    reason: '',
+    proofNote: '',
+  });
+  const [rejectionTarget, setRejectionTarget] = useState(null);
+  const [rejectionReason, setRejectionReason] = useState('');
   const [selectedPlanId, setSelectedPlanId] = useState('');
   const [editingPlanId, setEditingPlanId] = useState(null);
   const [message, setMessage] = useState('');
@@ -174,15 +199,16 @@ export default function Fees() {
   async function load() {
     setError('');
     try {
-      const [studentRows, planRows, paymentRows, reportRows, reminderRows, auditRows, whatsappRows, templateRows] = await Promise.all([
+      const [studentRows, planRows, paymentRows, reportRows, reminderRows, auditRows, whatsappRows, templateRows, discountRows] = await Promise.all([
         fetchStudents(),
         fetchFeePlans(),
-        fetchFeePayments(),
-        fetchFeeReports(),
-        fetchFeeReminders(),
-        fetchFeeAuditLogs(),
+        fetchFeePayments().catch(() => []),
+        fetchFeeReports().catch(() => null),
+        fetchFeeReminders().catch(() => []),
+        fetchFeeAuditLogs().catch(() => []),
         fetchWhatsAppStatus().catch(() => null),
         fetchMessageTemplates().catch(() => []),
+        fetchDiscountRequests().catch(() => []),
       ]);
       const structureRows = await fetchFeeStructures().catch(() => []);
       setStudents(studentRows);
@@ -192,6 +218,7 @@ export default function Fees() {
       setReports(reportRows);
       setReminders(reminderRows);
       setAuditLogs(auditRows);
+      setDiscountRequests(discountRows);
       setWhatsappStatus(whatsappRows);
       setMessageTemplates(templateRows);
       const nextPlan = planRows.find((plan) => String(plan.id) === String(selectedPlanId)) || planRows[0];
@@ -214,6 +241,7 @@ export default function Fees() {
     ? feeStructures.filter((item) => item.status !== 'Inactive').map((item) => ({ label: item.courseName, amount: item.feeAmount, paymentType: item.paymentType || 'Installment', billingCycle: item.billingCycle, duration: item.duration, classRange: item.classRange }))
     : defaultCoursePrograms;
   const selectedPayments = payments.filter((payment) => String(payment.planId || payment.fee_plan_id) === String(selectedPlanId));
+  const selectedDiscounts = discountRequests.filter((request) => String(request.feeInvoiceId) === String(selectedPlanId));
   const componentTotal = planForm.components.reduce((sum, component) => sum + Number(component.amount || 0), 0);
   const formTotal = componentTotal || Number(planForm.totalAmount || 0);
   const formNet = Math.max(0, formTotal - Number(planForm.discountAmount || 0));
@@ -396,6 +424,59 @@ export default function Fees() {
       await load();
     } catch (err) {
       setError(err.error || 'Could not save payment');
+    }
+  }
+
+  function openDiscountRequest(plan = selectedPlan) {
+    if (!plan) return;
+    setDiscountForm({
+      feeInvoiceId: String(plan.id),
+      studentId: String(plan.student_id || plan.studentId),
+      discountType: 'FIXED',
+      discountAmount: '',
+      discountPercent: '',
+      reason: '',
+      proofNote: '',
+    });
+    setDiscountModalOpen(true);
+  }
+
+  async function handleDiscountRequest(e) {
+    e.preventDefault();
+    setError('');
+    setMessage('');
+    try {
+      await createDiscountRequest({
+        ...discountForm,
+        discountAmount: discountForm.discountType === 'FIXED' ? Number(discountForm.discountAmount || 0) : 0,
+        discountPercent: discountForm.discountType === 'PERCENT' ? Number(discountForm.discountPercent || 0) : 0,
+      });
+      setDiscountModalOpen(false);
+      setMessage('Discount request submitted for approval. The fee balance is unchanged.');
+      await load();
+    } catch (err) {
+      setError(err.error || 'Could not submit discount request');
+    }
+  }
+
+  async function handleDiscountAction(action, request, payload) {
+    setError('');
+    setMessage('');
+    try {
+      if (action === 'approve') await approveDiscountRequest(request.id);
+      if (action === 'reject') await rejectDiscountRequest(request.id, payload);
+      if (action === 'cancel') await cancelDiscountRequest(request.id);
+      if (action === 'apply') await applyDiscountRequest(request.id);
+      setRejectionTarget(null);
+      setRejectionReason('');
+      setMessage(
+        action === 'approve'
+          ? 'Discount approved. The balance remains unchanged until an accountant applies it.'
+          : `Discount ${action === 'apply' ? 'applied' : `${action}ed`}.`
+      );
+      await load();
+    } catch (err) {
+      setError(err.error || `Could not ${action} discount`);
     }
   }
 
@@ -675,6 +756,94 @@ export default function Fees() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={discountModalOpen} onOpenChange={setDiscountModalOpen}>
+        <DialogContent>
+          <form onSubmit={handleDiscountRequest}>
+            <DialogHeader>
+              <DialogTitle>Request Discount</DialogTitle>
+              <DialogDescription>
+                This creates a pending request only. The fee balance will not change until approval and application.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="mt-4 grid gap-3">
+              <select
+                value={discountForm.discountType}
+                onChange={(e) => setDiscountForm({
+                  ...discountForm,
+                  discountType: e.target.value,
+                  discountAmount: '',
+                  discountPercent: '',
+                })}
+                className="rounded-md border px-3 py-2 text-sm"
+              >
+                <option value="FIXED">Fixed amount</option>
+                <option value="PERCENT">Percentage</option>
+              </select>
+              {discountForm.discountType === 'FIXED' ? (
+                <Input
+                  type="number"
+                  min="1"
+                  value={discountForm.discountAmount}
+                  onChange={(e) => setDiscountForm({ ...discountForm, discountAmount: e.target.value })}
+                  placeholder="Discount amount"
+                  required
+                />
+              ) : (
+                <Input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={discountForm.discountPercent}
+                  onChange={(e) => setDiscountForm({ ...discountForm, discountPercent: e.target.value })}
+                  placeholder="Discount percentage"
+                  required
+                />
+              )}
+              <Input
+                value={discountForm.reason}
+                onChange={(e) => setDiscountForm({ ...discountForm, reason: e.target.value })}
+                placeholder="Reason, for example Sibling discount"
+                required
+              />
+              <Textarea
+                value={discountForm.proofNote}
+                onChange={(e) => setDiscountForm({ ...discountForm, proofNote: e.target.value })}
+                placeholder="Proof note"
+                required
+              />
+            </div>
+            <DialogFooter className="mt-5">
+              <Button type="button" variant="outline" onClick={() => setDiscountModalOpen(false)}>Cancel</Button>
+              <Button type="submit">Submit Request</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(rejectionTarget)} onOpenChange={(open) => { if (!open) setRejectionTarget(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Reject Discount Request</DialogTitle>
+            <DialogDescription>A rejection reason is required and will remain in the audit trail.</DialogDescription>
+          </DialogHeader>
+          <Textarea
+            value={rejectionReason}
+            onChange={(e) => setRejectionReason(e.target.value)}
+            placeholder="Rejection reason"
+          />
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRejectionTarget(null)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              disabled={!rejectionReason.trim()}
+              onClick={() => handleDiscountAction('reject', rejectionTarget, rejectionReason)}
+            >
+              Reject
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <div className="grid gap-4 md:grid-cols-4">
         {[
           ['Net Fees', totals.netFees],
@@ -692,6 +861,7 @@ export default function Fees() {
           <TabsTrigger value="plans">Fee Plans</TabsTrigger>
           <TabsTrigger value="records">Student Profiles</TabsTrigger>
           <TabsTrigger value="payments">Payments</TabsTrigger>
+          <TabsTrigger value="discounts">Discount Approvals</TabsTrigger>
           <TabsTrigger value="reports">Reports</TabsTrigger>
           <TabsTrigger value="templates">Templates</TabsTrigger>
           <TabsTrigger value="audit">Audit</TabsTrigger>
@@ -894,7 +1064,9 @@ export default function Fees() {
               {feeCategories.map((category) => <option key={category}>{category}</option>)}
             </select>
             <input type="number" value={planForm.totalAmount} onChange={(e) => setPlanForm({ ...planForm, totalAmount: e.target.value })} placeholder="Manual total if no breakup" className="rounded-md border px-3 py-2 text-sm" required={!componentTotal} />
-            <input type="number" value={planForm.discountAmount} onChange={(e) => setPlanForm({ ...planForm, discountAmount: e.target.value })} placeholder="Discount amount" className="rounded-md border px-3 py-2 text-sm" />
+            <div className="rounded-md border bg-slate-50 px-3 py-2 text-sm text-slate-600">
+              Discounts are managed through requests after the fee plan is created.
+            </div>
           </div>
 
           <div className="mt-5 rounded-xl border border-slate-200 p-4">
@@ -933,19 +1105,10 @@ export default function Fees() {
           </div>
 
           <div className="mt-5 rounded-xl border border-slate-200 p-4">
-            <h4 className="font-semibold">Discount Approval</h4>
-            <div className="mt-3 grid gap-3 md:grid-cols-2">
-              <select value={planForm.discountType} onChange={(e) => setPlanForm({ ...planForm, discountType: e.target.value })} className="rounded-md border px-3 py-2 text-sm">
-                {discountTypes.map((type) => <option key={type} value={type}>{type || 'No discount type'}</option>)}
-              </select>
-              <input value={planForm.approvedBy} onChange={(e) => setPlanForm({ ...planForm, approvedBy: e.target.value })} placeholder="Approved by Director / Admin" className="rounded-md border px-3 py-2 text-sm" />
-              <input type="date" value={planForm.discountApprovedDate} onChange={(e) => setPlanForm({ ...planForm, discountApprovedDate: e.target.value })} className="rounded-md border px-3 py-2 text-sm" />
-              <input value={planForm.discountReason} onChange={(e) => setPlanForm({ ...planForm, discountReason: e.target.value })} placeholder="Discount reason" className="rounded-md border px-3 py-2 text-sm" />
-              <input value={planForm.discountProofNote} onChange={(e) => setPlanForm({ ...planForm, discountProofNote: e.target.value })} placeholder="Proof / note" className="rounded-md border px-3 py-2 text-sm md:col-span-2" />
-              <select value={planForm.feeStatus} onChange={(e) => setPlanForm({ ...planForm, feeStatus: e.target.value })} className="rounded-md border px-3 py-2 text-sm md:col-span-2">
-                {feeStatuses.map((status) => <option key={status} value={status}>{status || 'Auto fee status'}</option>)}
-              </select>
-            </div>
+            <h4 className="font-semibold">Fee Status</h4>
+            <select value={planForm.feeStatus} onChange={(e) => setPlanForm({ ...planForm, feeStatus: e.target.value })} className="mt-3 w-full rounded-md border px-3 py-2 text-sm">
+              {feeStatuses.map((status) => <option key={status} value={status}>{status || 'Auto fee status'}</option>)}
+            </select>
           </div>
 
           <div className="mt-5 grid gap-3 md:grid-cols-2">
@@ -1311,6 +1474,83 @@ export default function Fees() {
 
         </TabsContent>
 
+        <TabsContent value="discounts" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Discount Approval Queue</CardTitle>
+              <CardDescription>
+                {role === 'counsellor'
+                  ? 'Your discount requests and their current status.'
+                  : 'Approve or reject requests, then apply approved discounts as a separate accounting action.'}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Student / Course</TableHead>
+                    <TableHead>Branch</TableHead>
+                    <TableHead>Requested Discount</TableHead>
+                    <TableHead>Reason / Proof</TableHead>
+                    <TableHead>Requested By</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {discountRequests.map((request) => (
+                    <TableRow key={request.id}>
+                      <TableCell>
+                        <p className="font-semibold">{request.studentName}</p>
+                        <p className="text-xs text-muted-foreground">{request.courseName}</p>
+                        <p className="text-xs text-muted-foreground">
+                          Original {money(request.originalFee)} · Paid {money(request.paidAmount)} · Pending {money(request.pendingBalance)}
+                        </p>
+                      </TableCell>
+                      <TableCell>{request.branchId || '-'}</TableCell>
+                      <TableCell className="font-semibold">
+                        {request.discountType === 'PERCENT'
+                          ? `${request.discountPercent}%`
+                          : money(request.discountAmount)}
+                      </TableCell>
+                      <TableCell>
+                        <p>{request.reason}</p>
+                        <p className="text-xs text-muted-foreground">{request.proofNote}</p>
+                      </TableCell>
+                      <TableCell>
+                        <p>{request.requestedBy || '-'}</p>
+                        <p className="text-xs text-muted-foreground">{request.requestedAt}</p>
+                      </TableCell>
+                      <TableCell><Badge variant={request.status === 'APPLIED' ? 'default' : 'secondary'}>{request.status}</Badge></TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap gap-2">
+                          {request.status === 'PENDING' && canApproveDiscount ? (
+                            <Button size="sm" onClick={() => handleDiscountAction('approve', request)}>Approve</Button>
+                          ) : null}
+                          {request.status === 'PENDING' && canRejectDiscount ? (
+                            <Button size="sm" variant="destructive" onClick={() => setRejectionTarget(request)}>Reject</Button>
+                          ) : null}
+                          {request.status === 'PENDING' ? (
+                            <Button size="sm" variant="outline" onClick={() => handleDiscountAction('cancel', request)}>Cancel</Button>
+                          ) : null}
+                          {request.status === 'APPROVED' && canApplyDiscount ? (
+                            <Button size="sm" onClick={() => handleDiscountAction('apply', request)}>Apply Discount</Button>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {!discountRequests.length ? (
+                    <TableRow>
+                      <TableCell colSpan={7} className="text-center text-muted-foreground">No discount requests found.</TableCell>
+                    </TableRow>
+                  ) : null}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
         <TabsContent value="audit" className="space-y-6">
       <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <h3 className="font-semibold">Fee Audit Log</h3>
@@ -1348,6 +1588,14 @@ export default function Fees() {
                 </button>
                 <div className="mt-3 flex gap-2">
                   <button onClick={() => startEditPlan(plan)} className={`rounded-md px-3 py-1 text-sm ${String(selectedPlanId) === String(plan.id) ? 'border border-slate-600 text-white' : 'border'}`}>Edit</button>
+                  {canRequestDiscount ? (
+                    <button
+                      onClick={() => openDiscountRequest(plan)}
+                      className={`rounded-md px-3 py-1 text-sm ${String(selectedPlanId) === String(plan.id) ? 'border border-slate-600 text-white' : 'border'}`}
+                    >
+                      Request Discount
+                    </button>
+                  ) : null}
                   {canDelete ? <button onClick={() => setDeleteTarget({ type: 'plan', id: plan.id })} className="rounded-md bg-rose-500 px-3 py-1 text-sm text-white">Delete</button> : null}
                 </div>
               </div>
@@ -1365,6 +1613,38 @@ export default function Fees() {
                 <p className="text-slate-600">{selectedPlan.courseProgram || selectedPlan.feeCategory}</p>
                 <p className="mt-2">Final payable {money(selectedPlan.netAmount)}, paid {money(selectedPlan.paidAmount)}, pending {money(selectedPlan.dueAmount)}</p>
                 {selectedPlan.discountAmount > 0 ? <p className="text-slate-600">Discount: {money(selectedPlan.discountAmount)} ({selectedPlan.discountType || 'Approved discount'}) approved by {selectedPlan.approvedBy || '-'}</p> : null}
+                {canRequestDiscount ? (
+                  <Button size="sm" className="mt-3" onClick={() => openDiscountRequest(selectedPlan)}>
+                    Request Discount
+                  </Button>
+                ) : null}
+              </div>
+
+              <div>
+                <p className="text-sm font-semibold">Discount History</p>
+                <div className="mt-2 space-y-2 text-sm">
+                  {selectedDiscounts.map((request) => (
+                    <div key={request.id} className="rounded-md border bg-slate-50 px-3 py-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="font-semibold">
+                            {request.discountType === 'PERCENT'
+                              ? `${request.discountPercent}%`
+                              : money(request.discountAmount)}
+                            {' '}— {request.reason}
+                          </p>
+                          <p className="text-slate-500">
+                            Requested by {request.requestedBy || '-'} on {request.requestedAt || '-'}
+                          </p>
+                          {request.approvedBy ? <p className="text-slate-500">Approved by {request.approvedBy}</p> : null}
+                          {request.rejectionReason ? <p className="text-rose-600">Rejected: {request.rejectionReason}</p> : null}
+                        </div>
+                        <Badge variant={request.status === 'APPLIED' ? 'default' : 'secondary'}>{request.status}</Badge>
+                      </div>
+                    </div>
+                  ))}
+                  {!selectedDiscounts.length ? <p className="text-slate-500">No discount requests for this fee plan.</p> : null}
+                </div>
               </div>
 
               <div>

@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { getCurrentUser, setStoredUser, removeToken, removeStoredUser } from './api';
-import { canAccessModule, canApprove, canApproveCorrections, canDelete, canEditFinance, canManageUsers, canPay, isAdminRole, normalizeRole } from './rbac';
+import { academicMasterPermissions, canAccessModule, canApprove, canApproveCorrections, canDelete, canEditFinance, canManageUsers, canPay, discountPermissions, isAdminRole, normalizeRole } from './rbac';
 
 const AuthContext = createContext({
   user: null,
@@ -54,6 +54,8 @@ export function AuthProvider({ children }) {
         canEditFinance: canEditFinance(user?.role),
         canManageUsers: canManageUsers(user?.role),
         canApproveCorrections: canApproveCorrections(user?.role),
+        ...discountPermissions(user?.role),
+        ...academicMasterPermissions(user?.role),
       },
     }),
     [user]
