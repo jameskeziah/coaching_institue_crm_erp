@@ -1,10 +1,11 @@
 const Razorpay = require('razorpay');
 const { env } = require('../config/env');
+const { getTenantFeeSettings } = require('./tenantFeeSettings.service');
 
 let razorpay = null;
 
-function getRazorpayClient() {
-  if (!env.RAZORPAY_KEY_ID || !env.RAZORPAY_KEY_SECRET) {
+function createRazorpayClient({ keyId, keySecret }) {
+  if (!keyId || !keySecret) {
     if (env.NODE_ENV === 'production') {
       throw new Error('Razorpay credentials are required in production');
     }
@@ -13,10 +14,36 @@ function getRazorpayClient() {
     return null;
   }
 
+  return new Razorpay({
+    key_id: keyId,
+    key_secret: keySecret,
+  });
+}
+
+function getRazorpayClient() {
   if (!razorpay) {
-    razorpay = new Razorpay({
-      key_id: env.RAZORPAY_KEY_ID,
-      key_secret: env.RAZORPAY_KEY_SECRET,
+    razorpay = createRazorpayClient({
+      keyId: env.RAZORPAY_KEY_ID,
+      keySecret: env.RAZORPAY_KEY_SECRET,
+    });
+  }
+
+  return razorpay;
+}
+
+async function getTenantRazorpayClient(tenantId) {
+  const settings = await getTenantFeeSettings(tenantId, { includeSecrets: true });
+  if (settings.razorpayEnabled && settings.razorpayKeyId && settings.razorpayKeySecret) {
+    return createRazorpayClient({
+      keyId: settings.razorpayKeyId,
+      keySecret: settings.razorpayKeySecret,
+    });
+  }
+
+  if (!razorpay) {
+    razorpay = createRazorpayClient({
+      keyId: env.RAZORPAY_KEY_ID,
+      keySecret: env.RAZORPAY_KEY_SECRET,
     });
   }
 
@@ -24,5 +51,7 @@ function getRazorpayClient() {
 }
 
 module.exports = {
+  createRazorpayClient,
   getRazorpayClient,
+  getTenantRazorpayClient,
 };

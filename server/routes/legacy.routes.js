@@ -6,7 +6,7 @@ const { env } = require('../config/env');
 const authMiddleware = require('../middleware/auth');
 const { requireTenant } = require('../middleware/tenant');
 const { requireAnyRole } = require('../middleware/rbac');
-const { ROLE_GROUPS } = require('../config/roles');
+const { ROLE_GROUPS, ROLES } = require('../config/roles');
 
 const SECRET = env.JWT_SECRET;
 const ALLOW_REGISTRATION = env.ALLOW_REGISTRATION;
@@ -275,6 +275,12 @@ router.delete('/api/teachers/:id', authMiddleware, requireTenant, requireAnyRole
   await run(`DELETE FROM teacher_work_controls WHERE teacher_id = ?`, [id]);
   await run(`DELETE FROM teacher_management_actions WHERE teacher_id = ?`, [id]);
   await run(`DELETE FROM teacher_reviews WHERE teacher_id = ?`, [id]);
+  await run(
+    `UPDATE attendance_sessions
+     SET teacher_id = NULL
+     WHERE teacher_id = ? AND tenant_id = ?`,
+    [id, currentTenantId(req)]
+  );
   await run(`DELETE FROM teachers WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
   res.json({ ok: true });
 });
@@ -669,7 +675,7 @@ router.put('/api/follow-ups/:id', authMiddleware, requireTenant, requireAnyRole(
   await run(
     `UPDATE follow_up_tasks
      SET taskType = ?, dueDate = ?, priority = ?, assignedTo = ?, status = ?, notes = ?, linkedType = ?, linkedId = ?, updatedAt = ?
-     WHERE id = ?`,
+     WHERE id = ? AND tenant_id = ?`,
     [taskType, dueDate, priority, assignedTo, status, notes, linkedType, linkedId || null, now, req.params.id]
   );
   res.json(await getFollowUpTask(req.params.id));
@@ -1619,7 +1625,7 @@ router.get('/api/fees/summary', authMiddleware, requireTenant, requireAnyRole(RO
   res.json({ totals, plans });
 });
 
-router.get('/api/fee-plans', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.FINANCE), async (req, res) => {
+router.get('/api/fee-plans', authMiddleware, requireTenant, requireAnyRole([...ROLE_GROUPS.FINANCE, ROLES.COUNSELLOR]), async (req, res) => {
   res.json(await loadFeePlansWithPaid(currentTenantId(req)));
 });
 
@@ -1666,7 +1672,7 @@ router.delete('/api/fee-structures/:id', authMiddleware, requireTenant, requireA
   res.json({ ok: true });
 });
 
-router.get('/api/students/:id/fee-plans', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.FINANCE), async (req, res) => {
+router.get('/api/students/:id/fee-plans', authMiddleware, requireTenant, requireAnyRole([...ROLE_GROUPS.FINANCE, ROLES.COUNSELLOR]), async (req, res) => {
   const { id } = req.params;
   const student = await get(`SELECT id FROM students WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
   if (!student) return res.status(404).json({ error: 'Student not found' });
@@ -1708,8 +1714,8 @@ router.post('/api/fee-plans', authMiddleware, requireTenant, requireAnyRole(ROLE
   const totalAmount = feePlanTotalFromPayload(req.body);
   const validationError = requireFields({ ...req.body, totalAmount }, ['student_id', 'courseProgram', 'paymentType', 'totalAmount']);
   if (validationError) return res.status(400).json({ error: validationError });
-  if (Number(discountAmount || 0) > 0 && (!discountType || !discountReason || !approvedBy)) {
-    return res.status(400).json({ error: 'Discount type, reason, and approved by are required when a discount is applied' });
+  if (Number(discountAmount || 0) > 0) {
+    return res.status(400).json({ error: 'Discounts must be created through the discount approval workflow' });
   }
   const student = await get(`SELECT * FROM students WHERE id = ? AND tenant_id = ?`, [student_id, currentTenantId(req)]);
   if (!student) return res.status(404).json({ error: 'Student not found' });
@@ -1718,9 +1724,10 @@ router.post('/api/fee-plans', authMiddleware, requireTenant, requireAnyRole(ROLE
     `INSERT INTO fee_plans (
       tenant_id, student_id, courseProgram, feeCategory, paymentType, totalAmount, discountAmount,
       discountType, discountReason, approvedBy, discountApprovedDate, discountProofNote,
-      feeStatus, statusUpdatedAt, dueDate, installmentLabel, notes, createdAt, updatedAt
+      feeStatus, statusUpdatedAt, dueDate, installmentLabel, notes,
+      net_payable_amount, pending_balance, createdAt, updatedAt
     )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       currentTenantId(req),
       student_id,
@@ -1739,6 +1746,8 @@ router.post('/api/fee-plans', authMiddleware, requireTenant, requireAnyRole(ROLE
       dueDate,
       installmentLabel,
       notes,
+      Number(totalAmount),
+      Number(totalAmount),
       now,
       now,
     ]
@@ -1772,36 +1781,49 @@ router.put('/api/fee-plans/:id', authMiddleware, requireTenant, requireAnyRole(R
   const totalAmount = feePlanTotalFromPayload(req.body);
   const validationError = requireFields({ ...req.body, totalAmount }, ['courseProgram', 'paymentType', 'totalAmount']);
   if (validationError) return res.status(400).json({ error: validationError });
-  if (Number(discountAmount || 0) > 0 && (!discountType || !discountReason || !approvedBy)) {
-    return res.status(400).json({ error: 'Discount type, reason, and approved by are required when a discount is applied' });
-  }
-  const existing = await get(`SELECT * FROM fee_plans WHERE id = ?`, [id]);
+  const existing = await get(`SELECT * FROM fee_plans WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'Fee plan not found' });
+  if (Number(discountAmount || 0) !== Number(existing.discountAmount || 0)) {
+    return res.status(400).json({ error: 'Discounts can only change through the discount approval workflow' });
+  }
+  const paid = await get(
+    `SELECT COALESCE(SUM(amount), 0) AS paidAmount
+     FROM fee_payments
+     WHERE fee_plan_id = ? AND tenant_id = ?
+       AND COALESCE(status, 'Active') != 'Cancelled'`,
+    [id, currentTenantId(req)]
+  );
+  const netPayableAmount = Number(totalAmount) - Number(existing.discountAmount || 0);
+  const pendingBalance = Math.max(netPayableAmount - Number(paid?.paidAmount || 0), 0);
   const now = new Date().toISOString();
   await run(
     `UPDATE fee_plans SET
       courseProgram = ?, feeCategory = ?, paymentType = ?, totalAmount = ?, discountAmount = ?,
       discountType = ?, discountReason = ?, approvedBy = ?, discountApprovedDate = ?, discountProofNote = ?,
-      feeStatus = ?, statusUpdatedAt = ?, dueDate = ?, installmentLabel = ?, notes = ?, updatedAt = ?
+      feeStatus = ?, statusUpdatedAt = ?, dueDate = ?, installmentLabel = ?, notes = ?,
+      net_payable_amount = ?, pending_balance = ?, updatedAt = ?
      WHERE id = ?`,
     [
       courseProgram,
       feeCategory || courseProgram,
       paymentType,
       Number(totalAmount),
-      Number(discountAmount || 0),
-      discountType,
-      discountReason,
-      approvedBy,
-      discountApprovedDate,
-      discountProofNote,
+      Number(existing.discountAmount || 0),
+      existing.discountType,
+      existing.discountReason,
+      existing.approvedBy,
+      existing.discountApprovedDate,
+      existing.discountProofNote,
       feeStatus,
       feeStatus ? now : existing.statusUpdatedAt,
       dueDate,
       installmentLabel,
       notes,
+      netPayableAmount,
+      pendingBalance,
       now,
       id,
+      currentTenantId(req),
     ]
   );
   await syncFeeComponents(id, components);
@@ -1821,6 +1843,13 @@ router.put('/api/fee-plans/:id', authMiddleware, requireTenant, requireAnyRole(R
 
 router.delete('/api/fee-plans/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
   const { id } = req.params;
+  const discountHistory = await get(
+    `SELECT id FROM discount_requests WHERE fee_invoice_id = ? AND tenant_id = ? LIMIT 1`,
+    [String(id), currentTenantId(req)]
+  );
+  if (discountHistory) {
+    return res.status(409).json({ error: 'Fee plans with discount audit history cannot be deleted' });
+  }
   await run(`DELETE FROM fee_components WHERE fee_plan_id = ?`, [id]);
   await run(`DELETE FROM fee_installments WHERE fee_plan_id = ?`, [id]);
   const payments = await all(`SELECT id FROM fee_payments WHERE fee_plan_id = ?`, [id]);
@@ -1891,7 +1920,30 @@ router.post('/api/fee-payments', authMiddleware, requireTenant, requireAnyRole(R
   const receiptNumber = makeReceiptNumber(result.lastID);
   await run(`UPDATE fee_payments SET receiptNumber = ? WHERE id = ?`, [receiptNumber, result.lastID]);
   await run(`INSERT INTO fee_receipts (payment_id, receiptNumber, receiptType, pdfUrl, issuedAt) VALUES (?, ?, ?, ?, ?)`, [result.lastID, receiptNumber, receiptType, null, now]);
-  await run(`UPDATE fee_plans SET updatedAt = ? WHERE id = ?`, [now, fee_plan_id]);
+  await run(
+    `UPDATE fee_plans
+     SET net_payable_amount = totalAmount - COALESCE(discountAmount, 0),
+         pending_balance = CASE
+           WHEN totalAmount - COALESCE(discountAmount, 0) - COALESCE((
+             SELECT SUM(amount)
+             FROM fee_payments
+             WHERE fee_plan_id = ?
+               AND tenant_id = ?
+               AND COALESCE(status, 'Active') != 'Cancelled'
+           ), 0) > 0
+           THEN totalAmount - COALESCE(discountAmount, 0) - COALESCE((
+             SELECT SUM(amount)
+             FROM fee_payments
+             WHERE fee_plan_id = ?
+               AND tenant_id = ?
+               AND COALESCE(status, 'Active') != 'Cancelled'
+           ), 0)
+           ELSE 0
+         END,
+         updatedAt = ?
+     WHERE id = ? AND tenant_id = ?`,
+    [fee_plan_id, currentTenantId(req), fee_plan_id, currentTenantId(req), now, fee_plan_id, currentTenantId(req)]
+  );
   await writeFeeAudit('fee_payment', result.lastID, 'created', null, req.body, req.user.username);
   const payment = await get(
     `SELECT
@@ -1916,6 +1968,37 @@ router.delete('/api/fee-payments/:id', authMiddleware, requireTenant, requireAny
   if (!payment) return res.status(404).json({ error: 'Payment not found' });
   const now = new Date().toISOString();
   await run(`UPDATE fee_payments SET status = ?, cancelledAt = ?, cancelledBy = ?, cancelReason = ? WHERE id = ?`, ['Cancelled', now, req.user.username, req.body?.reason || 'Cancelled by admin', id]);
+  await run(
+    `UPDATE fee_plans
+     SET pending_balance = CASE
+       WHEN totalAmount - COALESCE(discountAmount, 0) - COALESCE((
+         SELECT SUM(amount)
+         FROM fee_payments
+         WHERE fee_plan_id = ?
+           AND tenant_id = ?
+           AND COALESCE(status, 'Active') != 'Cancelled'
+       ), 0) > 0
+       THEN totalAmount - COALESCE(discountAmount, 0) - COALESCE((
+         SELECT SUM(amount)
+         FROM fee_payments
+         WHERE fee_plan_id = ?
+           AND tenant_id = ?
+           AND COALESCE(status, 'Active') != 'Cancelled'
+       ), 0)
+       ELSE 0
+     END,
+     updatedAt = ?
+     WHERE id = ? AND tenant_id = ?`,
+    [
+      payment.fee_plan_id,
+      currentTenantId(req),
+      payment.fee_plan_id,
+      currentTenantId(req),
+      now,
+      payment.fee_plan_id,
+      currentTenantId(req),
+    ]
+  );
   await writeFeeAudit('fee_payment', id, 'cancelled', payment, { reason: req.body?.reason || 'Cancelled by admin' }, req.user.username);
   res.json({ ok: true });
 });
@@ -2403,6 +2486,13 @@ router.post('/api/attendance/sessions', authMiddleware, requireTenant, async (re
   const { date, batch, course, subject, teacher_id, teacherName, startTime, endTime, lectureType = 'Regular', remarks } = req.body;
   const validationError = requireFields(req.body, ['date', 'batch', 'subject', 'startTime', 'endTime']);
   if (validationError) return res.status(400).json({ error: validationError });
+  const managedBatch = await get(
+    `SELECT id, status FROM batches WHERE tenant_id = ? AND name = ? AND deleted_at IS NULL`,
+    [currentTenantId(req), batch]
+  );
+  if (managedBatch && managedBatch.status !== 'ACTIVE') {
+    return res.status(400).json({ error: 'Inactive batches cannot create attendance sessions' });
+  }
   let teacherLabel = teacherName || '';
   if (teacher_id) {
     const teacher = await get(`SELECT * FROM teachers WHERE id = ?`, [teacher_id]);
@@ -3540,6 +3630,13 @@ router.post('/api/academic/timetable', authMiddleware, requireTenant, async (req
   const { batchName, courseName, subject, teacher_id, teacherName, dayOfWeek, timeSlot, room, lectureType = 'Regular', status = 'Scheduled' } = req.body;
   const validationError = requireFields(req.body, ['batchName', 'subject', 'dayOfWeek', 'timeSlot']);
   if (validationError) return res.status(400).json({ error: validationError });
+  const managedBatch = await get(
+    `SELECT id, status FROM batches WHERE tenant_id = ? AND name = ? AND deleted_at IS NULL`,
+    [currentTenantId(req), batchName]
+  );
+  if (managedBatch && managedBatch.status !== 'ACTIVE') {
+    return res.status(400).json({ error: 'Inactive batches cannot create timetable entries' });
+  }
   const now = new Date().toISOString();
   const result = await run(
     `INSERT INTO batch_timetables (batchName, courseName, subject, teacher_id, teacherName, dayOfWeek, timeSlot, room, lectureType, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

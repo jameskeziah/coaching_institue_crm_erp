@@ -60,11 +60,7 @@ function serializePlan(row, installments = []) {
 }
 
 async function generateReceiptNumber({ tenantId }) {
-  const settings = await ensureTenantFeeSettings(tenantId);
-  const prefix = settings.receipt_prefix || settings.receiptPrefix || 'RCPT';
-  const number = Number(settings.next_receipt_number ?? settings.nextReceiptNumber ?? 1);
-  const receiptNumber = `${prefix}-${String(number).padStart(5, '0')}`;
-
+  await ensureTenantFeeSettings(tenantId);
   await run(
     `UPDATE tenant_fee_settings
      SET next_receipt_number = next_receipt_number + 1,
@@ -73,14 +69,24 @@ async function generateReceiptNumber({ tenantId }) {
     [tenantId]
   );
 
-  return receiptNumber;
+  const settings = await get(
+    `SELECT receipt_prefix, next_receipt_number
+     FROM tenant_fee_settings
+     WHERE tenant_id = ?`,
+    [tenantId]
+  );
+  const prefix = settings.receipt_prefix || settings.receiptPrefix || 'RCPT';
+  const number = Number(settings.next_receipt_number ?? settings.nextReceiptNumber ?? 2) - 1;
+  return `${prefix}-${String(number).padStart(5, '0')}`;
 }
 
 async function loadPlan(planId, tenantId) {
   const plan = await get(
     `SELECT p.*, s.name AS studentName
      FROM student_fee_plans p
-     LEFT JOIN students s ON s.id = p.student_id
+     LEFT JOIN students s
+       ON CAST(s.id AS TEXT) = CAST(p.student_id AS TEXT)
+      AND CAST(s.tenant_id AS TEXT) = CAST(p.tenant_id AS TEXT)
      WHERE p.id = ?
      AND p.tenant_id = ?`,
     [planId, tenantId]
@@ -230,11 +236,35 @@ async function recordFeePayment({
   return transaction(async () => {
     const cleanAmount = asNumber(amount);
     if (cleanAmount <= 0) throw new Error('Payment amount must be greater than 0');
+    if (razorpayPaymentId || razorpayPaymentLinkId) {
+      const existingPayment = await get(
+        `SELECT id
+         FROM fee_payments
+         WHERE (razorpay_payment_id = ? AND ? IS NOT NULL)
+            OR (razorpay_payment_link_id = ? AND ? IS NOT NULL)
+         LIMIT 1`,
+        [
+          razorpayPaymentId,
+          razorpayPaymentId,
+          razorpayPaymentLinkId,
+          razorpayPaymentLinkId,
+        ]
+      );
+      if (existingPayment) {
+        return {
+          paymentId: existingPayment.id,
+          duplicate: true,
+          plan: await loadPlan(studentFeePlanId, tenantId),
+        };
+      }
+    }
 
     const plan = await get(
       `SELECT p.*, s.name AS studentName, s.data AS studentData
        FROM student_fee_plans p
-       LEFT JOIN students s ON s.id = p.student_id
+       LEFT JOIN students s
+         ON CAST(s.id AS TEXT) = CAST(p.student_id AS TEXT)
+        AND CAST(s.tenant_id AS TEXT) = CAST(p.tenant_id AS TEXT)
        WHERE p.id = ?
        AND p.tenant_id = ?`,
       [studentFeePlanId, tenantId]
@@ -257,7 +287,7 @@ async function recordFeePayment({
     }
 
     const paymentId = crypto.randomUUID();
-    await run(
+    const paymentResult = await run(
       `INSERT INTO fee_payments
         (tenant_id, student_id, student_fee_plan_id, student_fee_installment_id, amount, payment_mode,
          paymentDate, paymentMethod, razorpay_payment_id, razorpay_payment_link_id,
@@ -275,15 +305,7 @@ async function recordFeePayment({
         razorpayPaymentLinkId,
       ]
     );
-    const inserted = await get(
-      `SELECT id FROM fee_payments
-       WHERE tenant_id = ?
-       AND student_fee_plan_id = ?
-       ORDER BY id DESC
-       LIMIT 1`,
-      [tenantId, studentFeePlanId]
-    );
-    const localPaymentId = inserted?.id || paymentId;
+    const localPaymentId = paymentResult.lastID || paymentId;
 
     if (installment) {
       await run(
@@ -312,7 +334,9 @@ async function recordFeePayment({
     const updatedPlan = await get(
       `SELECT p.*, s.name AS studentName, s.data AS studentData
        FROM student_fee_plans p
-       LEFT JOIN students s ON s.id = p.student_id
+       LEFT JOIN students s
+         ON CAST(s.id AS TEXT) = CAST(p.student_id AS TEXT)
+        AND CAST(s.tenant_id AS TEXT) = CAST(p.tenant_id AS TEXT)
        WHERE p.id = ?
        AND p.tenant_id = ?`,
       [studentFeePlanId, tenantId]
@@ -330,11 +354,12 @@ async function recordFeePayment({
       branchName: studentData.branchName || studentData.branch || null,
       receiptDate: new Date().toISOString(),
       receiptFooterNote: settings.receipt_footer_note,
+      authorizedSignatureUrl: settings.authorized_signature_url,
     };
     const pdfPath = await generateReceiptPdf({ receipt });
     const receiptId = crypto.randomUUID();
 
-    await run(
+    const receiptResult = await run(
       `INSERT INTO fee_receipts
         (payment_id, tenant_id, receipt_number, receiptNumber, student_name, course_name,
          amount_paid, payment_mode, pending_balance, branch_name, receipt_date, pdf_path,
@@ -368,7 +393,7 @@ async function recordFeePayment({
 
     return {
       paymentId: localPaymentId,
-      receipt: { id: receiptId, ...receipt, pdfPath },
+      receipt: { id: receiptResult.lastID || receiptId, ...receipt, pdfPath },
       plan: await loadPlan(studentFeePlanId, tenantId),
     };
   });
