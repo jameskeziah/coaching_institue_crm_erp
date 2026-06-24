@@ -71,6 +71,7 @@ const envSchema = z.object({
   WHATSAPP_API_VERSION: z.string().optional().default('v22.0'),
   RAZORPAY_KEY_ID: z.string().optional(),
   RAZORPAY_KEY_SECRET: z.string().optional(),
+  RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -94,6 +95,7 @@ const productionRequiredVariables = [
   'WHATSAPP_API_VERSION',
   'RAZORPAY_KEY_ID',
   'RAZORPAY_KEY_SECRET',
+  'RAZORPAY_WEBHOOK_SECRET',
   'TENANT_BOOTSTRAP_SECRET',
   'MAIL_FROM',
   'SMTP_HOST',

@@ -1973,6 +1973,37 @@ async function migrateFeeStructureTemplates() {
 }
 
 async function migrateFeeFlowHardening() {
+  const invoiceDiscountColumns = [
+    ['discount_request_id', 'TEXT'],
+    ['net_payable_amount', 'REAL'],
+    ['pending_balance', 'REAL'],
+  ];
+  for (const [column, definition] of invoiceDiscountColumns) {
+    await addColumnIfMissing('fee_plans', column, definition);
+  }
+  await run(
+    `UPDATE fee_plans
+     SET net_payable_amount = COALESCE(net_payable_amount, totalAmount - COALESCE(discountAmount, 0)),
+         pending_balance = COALESCE(
+           pending_balance,
+           CASE WHEN totalAmount - COALESCE(discountAmount, 0) - COALESCE((
+             SELECT SUM(fee_payments.amount)
+             FROM fee_payments
+             WHERE fee_payments.fee_plan_id = fee_plans.id
+               AND fee_payments.tenant_id = fee_plans.tenant_id
+               AND COALESCE(fee_payments.status, 'Active') != 'Cancelled'
+           ), 0) > 0
+           THEN totalAmount - COALESCE(discountAmount, 0) - COALESCE((
+               SELECT SUM(fee_payments.amount)
+               FROM fee_payments
+               WHERE fee_payments.fee_plan_id = fee_plans.id
+                 AND fee_payments.tenant_id = fee_plans.tenant_id
+                 AND COALESCE(fee_payments.status, 'Active') != 'Cancelled'
+             ), 0)
+           ELSE 0 END
+         )`
+  );
+
   await run(
     `CREATE TABLE IF NOT EXISTS tenant_fee_settings (
       id TEXT PRIMARY KEY,
@@ -2096,17 +2127,60 @@ async function migrateFeeFlowHardening() {
   );
 
   await run(
+    `CREATE TABLE IF NOT EXISTS discount_requests (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      branch_id TEXT,
+      student_id TEXT NOT NULL,
+      admission_id TEXT,
+      fee_invoice_id TEXT NOT NULL,
+      discount_type TEXT NOT NULL,
+      discount_amount INTEGER NOT NULL DEFAULT 0,
+      discount_percent INTEGER NOT NULL DEFAULT 0,
+      reason TEXT NOT NULL,
+      proof_note TEXT NOT NULL,
+      requested_by_user_id TEXT NOT NULL,
+      requested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      approved_by_user_id TEXT,
+      approved_at TEXT,
+      rejected_by_user_id TEXT,
+      rejected_at TEXT,
+      rejection_reason TEXT,
+      cancelled_by_user_id TEXT,
+      cancelled_at TEXT,
+      applied_by_user_id TEXT,
+      applied_at TEXT,
+      applied_amount INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(
     `CREATE TABLE IF NOT EXISTS audit_logs (
       id TEXT PRIMARY KEY,
       tenant_id TEXT NOT NULL,
+      branch_id TEXT,
       actor_user_id TEXT,
       action TEXT NOT NULL,
       entity_type TEXT NOT NULL,
       entity_id TEXT NOT NULL,
+      old_values TEXT DEFAULT '{}',
+      new_values TEXT DEFAULT '{}',
       metadata TEXT DEFAULT '{}',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`
   );
+
+  const auditColumns = [
+    ['branch_id', 'TEXT'],
+    ['old_values', "TEXT DEFAULT '{}'"],
+    ['new_values', "TEXT DEFAULT '{}'"],
+  ];
+  for (const [column, definition] of auditColumns) {
+    await addColumnIfMissing('audit_logs', column, definition);
+  }
 
   const paymentColumns = [
     ['student_fee_plan_id', 'TEXT'],
@@ -2157,7 +2231,258 @@ async function migrateFeeFlowHardening() {
   await run(`CREATE INDEX IF NOT EXISTS idx_student_fee_installments_due ON student_fee_installments (tenant_id, due_date, status)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_fee_payment_links_installment ON fee_payment_links (tenant_id, student_fee_installment_id)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_fee_discount_requests_plan ON fee_discount_requests (tenant_id, student_fee_plan_id, status)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_discount_requests_invoice ON discount_requests (tenant_id, fee_invoice_id, status)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_discount_requests_student ON discount_requests (tenant_id, student_id, created_at)`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_discount_requests_one_pending ON discount_requests (tenant_id, fee_invoice_id) WHERE status = 'PENDING'`);
   await run(`CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_entity ON audit_logs (tenant_id, entity_type, entity_id)`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_fee_payments_razorpay_payment ON fee_payments (razorpay_payment_id) WHERE razorpay_payment_id IS NOT NULL`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_fee_payments_razorpay_link ON fee_payments (razorpay_payment_link_id) WHERE razorpay_payment_link_id IS NOT NULL`);
+}
+
+async function migrateAcademicMasterData() {
+  const branchColumns = [
+    ['phone', 'TEXT'],
+    ['email', 'TEXT'],
+    ['is_active', 'INTEGER NOT NULL DEFAULT 1'],
+  ];
+  for (const [column, definition] of branchColumns) {
+    await addColumnIfMissing('branches', column, definition);
+  }
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS courses (
+      id TEXT PRIMARY KEY,
+      tenant_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      code TEXT NOT NULL,
+      course_type TEXT NOT NULL DEFAULT 'OTHER',
+      class_level TEXT,
+      duration_months INTEGER NOT NULL DEFAULT 12,
+      description TEXT,
+      default_fee REAL NOT NULL DEFAULT 0,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (tenant_id, code)
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS subjects (
+      id TEXT PRIMARY KEY,
+      tenant_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      code TEXT NOT NULL,
+      description TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (tenant_id, code)
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS batches (
+      id TEXT PRIMARY KEY,
+      tenant_id INTEGER NOT NULL,
+      branch_id TEXT NOT NULL,
+      course_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      code TEXT NOT NULL,
+      academic_year TEXT NOT NULL,
+      start_date TEXT NOT NULL,
+      end_date TEXT NOT NULL,
+      capacity INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PLANNED',
+      deleted_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (tenant_id, code)
+    )`
+  );
+  await addColumnIfMissing('batches', 'deleted_at', 'TEXT');
+  await run(
+    `CREATE TABLE IF NOT EXISTS batch_timings (
+      id TEXT PRIMARY KEY,
+      tenant_id INTEGER NOT NULL,
+      batch_id TEXT NOT NULL,
+      day_of_week TEXT NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      room_name TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS faculty_subjects (
+      id TEXT PRIMARY KEY,
+      tenant_id INTEGER NOT NULL,
+      faculty_id TEXT NOT NULL,
+      subject_id TEXT NOT NULL,
+      is_primary INTEGER NOT NULL DEFAULT 0,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (tenant_id, faculty_id, subject_id)
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS batch_students (
+      id TEXT PRIMARY KEY,
+      tenant_id INTEGER NOT NULL,
+      batch_id TEXT NOT NULL,
+      student_id TEXT NOT NULL,
+      joined_at TEXT NOT NULL,
+      left_at TEXT,
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS batch_teachers (
+      id TEXT PRIMARY KEY,
+      tenant_id INTEGER NOT NULL,
+      batch_id TEXT NOT NULL,
+      teacher_id TEXT NOT NULL,
+      subject_id TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'PRIMARY',
+      assigned_from TEXT NOT NULL,
+      assigned_to TEXT,
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  const studentColumns = [
+    ['branch_id', 'TEXT'],
+    ['primary_course_id', 'TEXT'],
+    ['primary_batch_id', 'TEXT'],
+    ['student_name', 'TEXT'],
+    ['parent_name', 'TEXT'],
+    ['parent_phone', 'TEXT'],
+    ['class_level', 'TEXT'],
+    ['school_name', 'TEXT'],
+    ['admission_id', 'TEXT'],
+    ['converted_from_lead_id', 'TEXT'],
+    ['status', "TEXT DEFAULT 'ACTIVE'"],
+    ['legacy_data', 'TEXT'],
+    ['created_at', 'TEXT'],
+    ['updated_at', 'TEXT'],
+  ];
+  for (const [column, definition] of studentColumns) {
+    await addColumnIfMissing('students', column, definition);
+  }
+
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_branches_tenant_code ON branches (tenant_id, code) WHERE deleted_at IS NULL`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_batches_tenant_branch ON batches (tenant_id, branch_id, status)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_batches_tenant_course ON batches (tenant_id, course_id, status)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_batch_timings_batch ON batch_timings (tenant_id, batch_id, is_active, day_of_week)`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_students_active ON batch_students (tenant_id, batch_id, student_id) WHERE status = 'ACTIVE'`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_teachers_active ON batch_teachers (tenant_id, batch_id, teacher_id, subject_id) WHERE status = 'ACTIVE'`);
+
+  const tenants = await all(`SELECT id FROM tenants`);
+  for (const tenant of tenants) {
+    let branch = await get(
+      `SELECT * FROM branches WHERE tenant_id = ? AND deleted_at IS NULL ORDER BY is_default DESC, created_at ASC LIMIT 1`,
+      [tenant.id]
+    );
+    if (!branch) {
+      const branchId = `branch_${tenant.id}_default`;
+      await run(
+        `INSERT INTO branches
+          (id, tenant_id, name, code, city, is_default, is_active, created_by, created_at, updated_at)
+         VALUES (?, ?, 'Main Branch', 'MAIN', 'Main', 1, 1, 'migration', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [branchId, tenant.id]
+      );
+      branch = await get(`SELECT * FROM branches WHERE id = ?`, [branchId]);
+    }
+    await run(`UPDATE branches SET code = COALESCE(NULLIF(code, ''), 'MAIN'), is_active = COALESCE(is_active, 1) WHERE id = ?`, [branch.id]);
+
+    const students = await all(`SELECT * FROM students WHERE tenant_id = ?`, [tenant.id]);
+    for (const student of students) {
+      let data = {};
+      try { data = student.data ? JSON.parse(student.data) : {}; } catch (error) { data = {}; }
+      const courseName = String(data.course || student.grade || 'General').trim() || 'General';
+      const courseCode = `LEGACY-${courseName.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-|-$/g, '')}`.slice(0, 40);
+      let course = await get(`SELECT * FROM courses WHERE tenant_id = ? AND code = ?`, [tenant.id, courseCode]);
+      if (!course) {
+        const courseId = `course_${tenant.id}_${courseCode.toLowerCase()}`;
+        await run(
+          `INSERT INTO courses
+            (id, tenant_id, name, code, course_type, class_level, duration_months, default_fee, is_active)
+           VALUES (?, ?, ?, ?, 'OTHER', ?, 12, 0, 1)`,
+          [courseId, tenant.id, courseName, courseCode, student.grade || null]
+        );
+        course = await get(`SELECT * FROM courses WHERE id = ?`, [courseId]);
+      }
+      const batchName = String(student.batch || 'General Batch').trim() || 'General Batch';
+      const batchCode = `LEGACY-${String(branch.code || 'MAIN')}-${courseCode}-${batchName.toUpperCase().replace(/[^A-Z0-9]+/g, '-')}`.slice(0, 60);
+      let batch = await get(`SELECT * FROM batches WHERE tenant_id = ? AND code = ?`, [tenant.id, batchCode]);
+      if (!batch) {
+        const batchId = `batch_${tenant.id}_${cryptoHash(batchCode)}`;
+        await run(
+          `INSERT INTO batches
+            (id, tenant_id, branch_id, course_id, name, code, academic_year,
+             start_date, end_date, capacity, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '2026-06-01', '2027-03-31', 1000, 'ACTIVE')`,
+          [batchId, tenant.id, branch.id, course.id, batchName, batchCode, data.academicYear || '2026-27']
+        );
+        batch = await get(`SELECT * FROM batches WHERE id = ?`, [batchId]);
+      }
+      await run(
+        `UPDATE students
+         SET branch_id = COALESCE(branch_id, ?),
+             primary_course_id = COALESCE(primary_course_id, ?),
+             primary_batch_id = COALESCE(primary_batch_id, ?),
+             student_name = COALESCE(student_name, name),
+             parent_name = COALESCE(parent_name, ?),
+             parent_phone = COALESCE(parent_phone, ?),
+             class_level = COALESCE(class_level, grade),
+             school_name = COALESCE(school_name, ?),
+             status = COALESCE(status, ?),
+             legacy_data = COALESCE(legacy_data, data),
+             created_at = COALESCE(created_at, CAST(CURRENT_TIMESTAMP AS TEXT)),
+             updated_at = COALESCE(updated_at, CAST(CURRENT_TIMESTAMP AS TEXT))
+         WHERE id = ? AND tenant_id = ?`,
+        [
+          branch.id,
+          course.id,
+          batch.id,
+          data.parentName || data.fatherName || data.motherName || null,
+          data.primaryPhone || data.whatsapp || null,
+          data.school || null,
+          data.status || 'ACTIVE',
+          student.id,
+          tenant.id,
+        ]
+      );
+      await run(
+        `INSERT INTO batch_students
+          (id, tenant_id, batch_id, student_id, joined_at, status, created_at, updated_at)
+         SELECT ?, ?, ?, ?, ?, 'ACTIVE', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+         WHERE NOT EXISTS (
+           SELECT 1 FROM batch_students
+           WHERE tenant_id = ? AND batch_id = ? AND student_id = ? AND status = 'ACTIVE'
+         )`,
+        [
+          `bs_${tenant.id}_${batch.id}_${student.id}`,
+          tenant.id,
+          batch.id,
+          String(student.id),
+          data.joiningDate || new Date().toISOString().slice(0, 10),
+          tenant.id,
+          batch.id,
+          String(student.id),
+        ]
+      );
+    }
+  }
+}
+
+function cryptoHash(value) {
+  return require('crypto').createHash('sha1').update(String(value)).digest('hex').slice(0, 16);
 }
 
 async function migrateExpenseColumns() {
@@ -2919,6 +3244,7 @@ async function migrate() {
   await migrateLeadActivities();
   await migrateAuthColumns();
   await migrateTenantOnboarding();
+  await migrateAcademicMasterData();
   await migrateFeeStructureTemplates();
   await migrateFeeFlowHardening();
   await migrateSuperAdmin();
@@ -2947,6 +3273,7 @@ module.exports = {
   migrateFeeStructureTemplates,
   migrateFeeFlowHardening,
   migrateTenantOnboarding,
+  migrateAcademicMasterData,
   migrateSuperAdmin,
   migrateAdmissionRealColumns,
   migrateMarketingCampaigns,

@@ -71,6 +71,7 @@ async function createRoleUser(adminToken, role, suffix) {
 
 async function main() {
   const suffix = Date.now();
+  const smokePhone = `9${String(suffix).slice(-9)}`;
   const config = await request('/config');
   if (typeof config.allowRegistration !== 'boolean') {
     throw new Error('Config did not return allowRegistration');
@@ -120,6 +121,61 @@ async function main() {
         status: 'Active',
       },
     }),
+  }));
+  const branchMaster = await request('/branches', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: `Smoke Branch ${suffix}`,
+      code: `SMK-${suffix}`,
+      city: 'Tembhurni',
+      phone: smokePhone,
+      isActive: true,
+    }),
+  }));
+  const courseMaster = await request('/courses', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: `Smoke Foundation 10 ${suffix}`,
+      code: `SMK-F10-${suffix}`,
+      courseType: 'FOUNDATION',
+      classLevel: '10th',
+      durationMonths: 12,
+      defaultFee: 10000,
+      isActive: true,
+    }),
+  }));
+  const subjectMaster = await request('/subjects', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: `Smoke Mathematics ${suffix}`,
+      code: `SMK-MATH-${suffix}`,
+      isActive: true,
+    }),
+  }));
+  const batchMaster = await request('/batches', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      branchId: branchMaster.data.id,
+      courseId: courseMaster.data.id,
+      name: `Smoke Morning Batch ${suffix}`,
+      code: `SMK-BATCH-${suffix}`,
+      academicYear: '2026-27',
+      startDate: '2026-06-01',
+      endDate: '2027-03-31',
+      capacity: 40,
+      status: 'ACTIVE',
+      timings: [
+        { dayOfWeek: 'MONDAY', startTime: '18:00', endTime: '20:00', roomName: 'Room 1' },
+        { dayOfWeek: 'WEDNESDAY', startTime: '18:00', endTime: '20:00', roomName: 'Room 1' },
+      ],
+    }),
+  }));
+  if (!branchMaster.data?.id || !courseMaster.data?.id || !subjectMaster.data?.id || !batchMaster.data?.id) {
+    throw new Error('Academic master creation failed');
+  }
+  await request(`/faculty/${teacher.id}/subjects`, withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ subjectId: subjectMaster.data.id, isPrimary: true }),
   }));
 
   await request(`/teachers/${teacher.id}`, withAuth(token, {
@@ -200,19 +256,22 @@ async function main() {
     body: JSON.stringify({
       name: `Smoke Student ${suffix}`,
       grade: '10th',
-      batch: 'Morning',
+      batch: batchMaster.data.name,
       attendance: '95%',
+      branchId: branchMaster.data.id,
+      primaryCourseId: courseMaster.data.id,
+      primaryBatchId: batchMaster.data.id,
       data: {
         status: 'Admitted',
         school: 'Smoke School',
         examTarget: 'Boards',
-        course: 'Foundation',
+        course: courseMaster.data.name,
         academicYear: '2026-27',
-        branch: 'Tembhurni',
+        branch: branchMaster.data.name,
         fatherName: 'Smoke Father',
         motherName: 'Smoke Mother',
-        primaryPhone: '9999999999',
-        whatsapp: '9999999999',
+        primaryPhone: smokePhone,
+        whatsapp: smokePhone,
         joiningDate: '2026-06-04',
         counsellor: 'Smoke Counsellor',
         documents: {
@@ -224,6 +283,60 @@ async function main() {
       },
     }),
   }));
+  const studentMasters = (await request('/students', withAuth(token))).find((row) => Number(row.id) === Number(student.id));
+  if (String(studentMasters?.branch_id || studentMasters?.branchId) !== String(branchMaster.data.id)
+    || String(studentMasters?.primary_course_id || studentMasters?.primaryCourseId) !== String(courseMaster.data.id)
+    || String(studentMasters?.primary_batch_id || studentMasters?.primaryBatchId) !== String(batchMaster.data.id)) {
+    throw new Error('Student relational academic fields were not saved');
+  }
+  await request(`/batches/${batchMaster.data.id}/teachers`, withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      teacherId: teacher.id,
+      subjectId: subjectMaster.data.id,
+      role: 'PRIMARY',
+      assignedFrom: '2026-06-01',
+    }),
+  }));
+  const batchDetail = await request(`/batches/${batchMaster.data.id}`, withAuth(token));
+  if (Number(batchDetail.data?.studentCount) !== 1 || Number(batchDetail.data?.teacherCount) !== 1 || batchDetail.data?.timings?.length !== 2) {
+    throw new Error(`Batch student/teacher mappings failed: ${JSON.stringify(batchDetail.data)}`);
+  }
+  await request(`/batches/${batchMaster.data.id}/timings`, withAuth(token, {
+    method: 'PUT',
+    body: JSON.stringify({
+      timings: [
+        { dayOfWeek: 'TUESDAY', startTime: '17:00', endTime: '19:00', roomName: 'Room 2' },
+      ],
+    }),
+  }));
+  const replacedTimings = await request(`/batches/${batchMaster.data.id}`, withAuth(token));
+  if (replacedTimings.data?.timings?.length !== 1 || replacedTimings.data.timings[0].dayOfWeek !== 'TUESDAY') {
+    throw new Error('Batch timing replacement failed');
+  }
+  await request(`/batches/${batchMaster.data.id}/status`, withAuth(token, {
+    method: 'PATCH',
+    body: JSON.stringify({ status: 'INACTIVE' }),
+  }));
+  const inactiveTeacherAssignment = await requestRaw(`/batches/${batchMaster.data.id}/teachers`, withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      teacherId: teacher.id,
+      subjectId: subjectMaster.data.id,
+      role: 'ASSISTANT',
+      assignedFrom: '2026-06-02',
+    }),
+  }));
+  if (inactiveTeacherAssignment.response.status !== 400) throw new Error('Inactive batch accepted a teacher assignment');
+  await request(`/batches/${batchMaster.data.id}/status`, withAuth(token, {
+    method: 'PATCH',
+    body: JSON.stringify({ status: 'ACTIVE' }),
+  }));
+  const batchAudit = await request(`/batches/${batchMaster.data.id}/audit`, withAuth(token));
+  const batchAuditActions = new Set((batchAudit.data || []).map((entry) => entry.action));
+  if (!['BATCH_CREATED', 'BATCH_TIMING_UPDATED', 'BATCH_DEACTIVATED', 'BATCH_ACTIVATED'].every((action) => batchAuditActions.has(action))) {
+    throw new Error('Batch audit trail is incomplete');
+  }
 
   const history = await request(`/students/${student.id}/history`, withAuth(token, {
     method: 'POST',
@@ -284,7 +397,7 @@ async function main() {
     method: 'POST',
     body: JSON.stringify({
       date: '2026-06-04',
-      batch: 'Morning',
+      batch: batchMaster.data.name,
       course: 'Foundation',
       subject: 'Physics',
       teacher_id: teacher.id,
@@ -321,7 +434,7 @@ async function main() {
     body: JSON.stringify({
       student_id: student.id,
       attendance_record_id: submittedSmokeRecord.id,
-      parentPhone: '9999999999',
+      parentPhone: smokePhone,
       callOutcome: 'Connected',
       notes: 'Smoke parent call',
     }),
@@ -392,7 +505,7 @@ async function main() {
     body: JSON.stringify({
       studentName: `Smoke Admission ${suffix}`,
       parentName: 'Smoke Parent',
-      parentPhone: '9999999999',
+      parentPhone: smokePhone,
       className: '10th',
       school: 'Smoke School',
       courseInterested: 'X Science',
@@ -414,12 +527,7 @@ async function main() {
       feeCategory: 'Tuition',
       paymentType: 'Installment',
       totalAmount: 10000,
-      discountAmount: 1000,
-      discountType: 'Scholarship Discount',
-      discountReason: 'Smoke scholarship approval',
-      approvedBy: 'Smoke Admin',
-      discountApprovedDate: '2026-06-04',
-      discountProofNote: 'Smoke proof note',
+      discountAmount: 0,
       dueDate: '2026-06-30',
       installmentLabel: 'Installment 1',
       components: [
@@ -433,7 +541,7 @@ async function main() {
       notes: 'Smoke fee plan',
     }),
   }));
-  if (!feePlan.id || Number(feePlan.dueAmount) !== 9000 || !feePlan.components?.length || !feePlan.installments?.length) {
+  if (!feePlan.id || Number(feePlan.dueAmount) !== 10000 || !feePlan.components?.length || !feePlan.installments?.length) {
     throw new Error('Fee plan creation failed');
   }
 
@@ -458,6 +566,163 @@ async function main() {
     }),
   }));
   if (!payment.id || !payment.receiptNumber?.startsWith('PK-FEE-')) throw new Error('Fee payment receipt generation failed');
+
+  const feeSettings = await request('/tenant/fee-settings', withAuth(token));
+  if (!feeSettings.data?.academicYear || feeSettings.data.hasRazorpayKeySecret === undefined) {
+    throw new Error('Tenant fee settings failed');
+  }
+  const updatedFeeSettings = await request('/tenant/fee-settings', withAuth(token, {
+    method: 'PUT',
+    body: JSON.stringify({
+      receiptPrefix: 'SMK',
+      defaultInstallmentCount: 3,
+      defaultInstallmentGapDays: 30,
+      discountApprovalRequired: true,
+    }),
+  }));
+  if (updatedFeeSettings.data?.receiptPrefix !== 'SMK') throw new Error('Tenant fee settings update failed');
+
+  const hardeningStructure = await request('/fee-structures', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: `Smoke FeeFlow ${suffix}`,
+      code: `SMOKE_FEEFLOW_${suffix}`,
+      category: 'OTHER',
+      academicYear: '2026-27',
+      durationMonths: 3,
+      totalAmount: 10000,
+      admissionFee: 1000,
+      tuitionFee: 9000,
+      materialFee: 0,
+      testSeriesFee: 0,
+      technologyFee: 0,
+      otherFee: 0,
+      installmentsAllowed: true,
+      discountAllowed: true,
+      maxDiscountAmount: 2000,
+      maxDiscountPercent: 20,
+      installments: [
+        { installmentNumber: 1, title: 'Admission installment', amount: 3333, dueAfterDays: 0 },
+        { installmentNumber: 2, title: 'Installment 2', amount: 3333, dueAfterDays: 30 },
+        { installmentNumber: 3, title: 'Installment 3', amount: 3334, dueAfterDays: 60 },
+      ],
+    }),
+  }));
+  if (!hardeningStructure.data?.id) throw new Error('FeeFlow structure creation failed');
+
+  const studentFeePlan = await request(`/students/${student.id}/student-fee-plans`, withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      feeStructureId: hardeningStructure.data.id,
+      admissionDate: new Date().toISOString(),
+    }),
+  }));
+  if (!studentFeePlan.data?.id || studentFeePlan.data.installments?.length !== 3) {
+    throw new Error('Student fee plan schedule generation failed');
+  }
+  if (studentFeePlan.data.installments.reduce((sum, item) => sum + Number(item.amount), 0) !== 10000) {
+    throw new Error('Student fee installments do not reconcile');
+  }
+
+  const hardeningPayment = await request(`/student-fee-plans/${studentFeePlan.data.id}/payments`, withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      studentFeeInstallmentId: studentFeePlan.data.installments[0].id,
+      amount: 1000,
+      paymentMode: 'CASH',
+    }),
+  }));
+  if (!hardeningPayment.data?.receipt?.receiptNumber?.startsWith('SMK-')) {
+    throw new Error('Backend FeeFlow receipt generation failed');
+  }
+
+  const agingReport = await request('/reports/fee-defaulters-aging', withAuth(token));
+  if (!agingReport.data?.summary?.dueToday || !Array.isArray(agingReport.data?.buckets?.dueToday)) {
+    throw new Error('Fee defaulter aging report failed');
+  }
+
+  const discountRequest = await request('/discount-requests', withAuth(accountantToken, {
+    method: 'POST',
+    body: JSON.stringify({
+      studentId: student.id,
+      admissionId: admission.id,
+      feeInvoiceId: feePlan.id,
+      discountType: 'FIXED',
+      discountAmount: 500,
+      reason: 'Smoke approved discount',
+      proofNote: 'Smoke proof',
+    }),
+  }));
+  if (!discountRequest.data?.id || discountRequest.data.status !== 'PENDING') {
+    throw new Error('Discount approval request failed');
+  }
+  const pendingDiscountPlan = (await request('/fee-plans', withAuth(token)))
+    .find((plan) => Number(plan.id) === Number(feePlan.id));
+  if (Number(pendingDiscountPlan?.discountAmount) !== 0 || Number(pendingDiscountPlan?.dueAmount) !== 7500) {
+    throw new Error('Pending discount changed the fee balance');
+  }
+  await request(`/discount-requests/${discountRequest.data.id}/approve`, withAuth(token, {
+    method: 'PATCH',
+    body: JSON.stringify({}),
+  }));
+  const approvedDiscountPlan = (await request('/fee-plans', withAuth(token)))
+    .find((plan) => Number(plan.id) === Number(feePlan.id));
+  if (Number(approvedDiscountPlan?.discountAmount) !== 0 || Number(approvedDiscountPlan?.dueAmount) !== 7500) {
+    throw new Error('Approval changed the fee balance before application');
+  }
+  await request(`/discount-requests/${discountRequest.data.id}/apply`, withAuth(accountantToken, {
+    method: 'PATCH',
+    body: JSON.stringify({}),
+  }));
+  const discountedPlan = (await request('/fee-plans', withAuth(token)))
+    .find((plan) => Number(plan.id) === Number(feePlan.id));
+  if (Number(discountedPlan?.discountAmount) !== 500 || Number(discountedPlan?.dueAmount) !== 7000) {
+    throw new Error('Applied discount did not reconcile the fee ledger');
+  }
+  if (String(discountedPlan?.discount_request_id || discountedPlan?.discountRequestId) !== String(discountRequest.data.id)) {
+    throw new Error('Applied discount request was not linked to the fee invoice');
+  }
+  const discountAudit = await request(`/discount-requests/${discountRequest.data.id}/audit`, withAuth(accountantToken));
+  const discountAuditActions = new Set((discountAudit.data || []).map((entry) => entry.action));
+  if (!['DISCOUNT_REQUESTED', 'DISCOUNT_APPROVED', 'DISCOUNT_APPLIED'].every((action) => discountAuditActions.has(action))) {
+    throw new Error('Discount audit trail is incomplete');
+  }
+
+  const rejectedDiscount = await request('/discount-requests', withAuth(counsellorToken, {
+    method: 'POST',
+    body: JSON.stringify({
+      studentId: student.id,
+      feeInvoiceId: feePlan.id,
+      discountType: 'PERCENT',
+      discountPercent: 5,
+      reason: 'Smoke rejected discount',
+      proofNote: 'Smoke rejected proof',
+    }),
+  }));
+  await request(`/discount-requests/${rejectedDiscount.data.id}/reject`, withAuth(token, {
+    method: 'PATCH',
+    body: JSON.stringify({ rejectionReason: 'Smoke rejection reason' }),
+  }));
+  const rejectedDetail = await request(`/discount-requests/${rejectedDiscount.data.id}`, withAuth(counsellorToken));
+  if (rejectedDetail.data?.status !== 'REJECTED' || rejectedDetail.data?.rejectionReason !== 'Smoke rejection reason') {
+    throw new Error('Discount rejection workflow failed');
+  }
+
+  const cancelledDiscount = await request('/discount-requests', withAuth(counsellorToken, {
+    method: 'POST',
+    body: JSON.stringify({
+      studentId: student.id,
+      feeInvoiceId: feePlan.id,
+      discountType: 'FIXED',
+      discountAmount: 100,
+      reason: 'Smoke cancelled discount',
+      proofNote: 'Smoke cancellation proof',
+    }),
+  }));
+  await request(`/discount-requests/${cancelledDiscount.data.id}/cancel`, withAuth(counsellorToken, {
+    method: 'PATCH',
+    body: JSON.stringify({}),
+  }));
 
   const feeSummary = await request('/fees/summary', withAuth(token));
   if (!feeSummary.totals || Number(feeSummary.totals.collected) < 2500) throw new Error('Fee summary did not include payment');
@@ -556,7 +821,7 @@ async function main() {
       grade: '10th',
       school: 'Smoke School',
       parentName: 'Smoke Father',
-      mobileNumber: '9999999999',
+      mobileNumber: smokePhone,
       course_id: aiCourse.id,
       courseName: aiCourse.courseName,
       batch: 'AI Lab Weekend',
@@ -948,7 +1213,7 @@ async function main() {
       test_id: performanceTest.id,
       student_id: student.id,
       studentName: student.name || `Smoke Student ${suffix}`,
-      parentPhone: '9999999999',
+      parentPhone: smokePhone,
       marksObtained: 545,
       totalMarks: 720,
       batchRank: 1,
@@ -1016,7 +1281,7 @@ async function main() {
     method: 'POST',
     body: JSON.stringify({
       student_id: student.id,
-      parentPhone: '9999999999',
+      parentPhone: smokePhone,
     }),
   });
   if (!parentPortal.student || !parentPortal.attendance?.length || !parentPortal.fees?.length || !Array.isArray(parentPortal.communication)) {
@@ -1035,8 +1300,11 @@ async function main() {
   await Promise.all([
     expectAllowed('/fees/summary', accountantToken),
     expectAllowed('/fee-plans', accountantToken),
+    expectAllowed('/branches', accountantToken),
+    expectAllowed('/courses', counsellorToken),
+    expectAllowed('/batches', teacherRoleToken),
     expectAllowed('/expenses', accountantToken),
-    expectForbidden('/fee-plans', counsellorToken),
+    expectAllowed('/fee-plans', counsellorToken),
     expectAllowed('/follow-ups', counsellorToken),
     expectAllowed('/students', counsellorToken),
     expectAllowed('/admissions', counsellorToken),
@@ -1049,6 +1317,16 @@ async function main() {
   await Promise.all([
     expectForbidden(`/expenses/${expense.id}/approve`, accountantToken, { method: 'PATCH', body: JSON.stringify({}) }),
     expectForbidden('/ontology/entities', accountantToken),
+    expectForbidden('/branches', accountantToken, {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Forbidden Branch', code: `FORB-${suffix}` }),
+    }),
+    expectForbidden('/subjects', counsellorToken, {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Forbidden Subject', code: `FORB-SUB-${suffix}` }),
+    }),
+    expectForbidden('/discount-requests', teacherRoleToken),
+    expectForbidden('/discount-requests', basicUserToken),
     expectForbidden(`/students/${student.id}`, accountantToken, { method: 'DELETE' }),
     expectForbidden('/expenses', counsellorToken),
     expectForbidden('/automation/follow-ups', counsellorToken, { method: 'POST', body: JSON.stringify({ minAgeDays: 1 }) }),
@@ -1075,8 +1353,6 @@ async function main() {
     expectForbidden('/ontology/entities', basicUserToken),
   ]);
 
-  await request(`/fee-payments/${payment.id}`, withAuth(token, { method: 'DELETE' }));
-  await request(`/fee-plans/${feePlan.id}`, withAuth(token, { method: 'DELETE' }));
   await request(`/expenses/${generatedRecurringExpense.id}`, withAuth(token, { method: 'DELETE' }));
   await request(`/recurring-expenses/${recurringTemplate.id}`, withAuth(token, { method: 'DELETE' }));
   await request(`/expenses/${expense.id}`, withAuth(token, { method: 'DELETE' }));
@@ -1114,7 +1390,6 @@ async function main() {
   await request(`/follow-ups/${followUp.id}`, withAuth(token, { method: 'DELETE' }));
   await request(`/student-history/${history.id}`, withAuth(token, { method: 'DELETE' }));
   await request(`/admissions/${admission.id}`, withAuth(token, { method: 'DELETE' }));
-  await request(`/students/${student.id}`, withAuth(token, { method: 'DELETE' }));
   await request(`/teacher-management-actions/${managementAction.id}`, withAuth(token, { method: 'DELETE' }));
   await request(`/teacher-work-controls/${workControl.id}`, withAuth(token, { method: 'DELETE' }));
   await request(`/teachers/${teacher.id}`, withAuth(token, { method: 'DELETE' }));
