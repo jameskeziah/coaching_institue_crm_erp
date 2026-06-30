@@ -87,14 +87,17 @@ The backend supports two database modes:
 
 SQLite is fine for local/single-user use. Use Postgres before deploying this as a shared multi-user system.
 
-## Current Stack
+## Stack Decision
 
-This project currently uses:
+This product version will continue with the existing stack:
 
 - **Frontend:** Vite + React
 - **Backend:** Express
-- **Database:** SQLite for local development, optional Postgres for deployment
-- **Database access:** Raw SQL
-- **Authentication:** JWT username/password authentication
+- **Database:** SQLite/Postgres with raw SQL
+- **Auth:** JWT username/password
 
-This repository should not be mixed with the separate Next.js/NestJS/Prisma SaaS project unless a deliberate migration is planned.
+We will not migrate this repo to Next.js, NestJS, Prisma, or Clerk at this stage.
+
+Reason: the current priority is to stabilize the existing product, complete core institute-management features, and keep local development reliable. A stack migration now would slow development, increase bugs, and create unnecessary instability.
+
+Future migrations can be reconsidered only after the current product version is stable, tested, and usable.
