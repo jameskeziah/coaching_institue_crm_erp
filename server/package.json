@@ -16,7 +16,7 @@
     "pdfkit": "^0.19.1",
     "pg": "^8.21.0",
     "razorpay": "^2.9.6",
-    "sqlite3": "^5.1.6",
+    "sqlite3": "^6.0.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
