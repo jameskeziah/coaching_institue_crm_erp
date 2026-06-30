@@ -292,6 +292,21 @@ export function updateStudent(id, payload) {
 export function deleteStudent(id) {
   return request(`/students/${id}`, { method: 'DELETE' });
 }
+export function fetchStudentProfile(id) { return request(`/students/${id}/profile`).then(unwrapData); }
+export function fetchStudentAcademic(id) { return request(`/students/${id}/academic`).then(unwrapData); }
+export function fetchStudentFees(id) { return request(`/students/${id}/fees`).then(unwrapData); }
+export function fetchStudentAttendance(id) { return request(`/students/${id}/attendance`).then(unwrapData); }
+export function fetchStudentTests(id) { return request(`/students/${id}/tests`).then(unwrapData); }
+export function fetchStudentFollowups(id) { return request(`/students/${id}/followups`).then(unwrapData); }
+export function fetchStudentCommunications(id) { return request(`/students/${id}/communications`).then(unwrapData); }
+export function fetchStudentGuardians(id) { return request(`/students/${id}/guardians`).then(unwrapData); }
+export function createStudentGuardian(id, payload) { return request(`/students/${id}/guardians`, { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function updateStudentGuardian(id, guardianId, payload) { return request(`/students/${id}/guardians/${guardianId}`, { method: 'PATCH', body: JSON.stringify(payload) }).then(unwrapData); }
+export function fetchStudentDocuments(id) { return request(`/students/${id}/documents`).then(unwrapData); }
+export function createStudentDocument(id, payload) { return request(`/students/${id}/documents`, { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function updateStudentDocument(id, documentId, payload) { return request(`/students/${id}/documents/${documentId}`, { method: 'PATCH', body: JSON.stringify(payload) }).then(unwrapData); }
+export function updateStudentStatus(id, status, options = {}) { return request(`/students/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status, ...options }) }).then(unwrapData); }
+export function archiveStudent(id, reason) { return request(`/students/${id}/archive`, { method: 'POST', body: JSON.stringify({ reason }) }); }
 
 function unwrapData(result) {
   return result?.data ?? result;
@@ -684,6 +699,39 @@ export function fetchWhatsAppStatus() {
 export function sendWhatsAppTest(payload) {
   return request('/whatsapp/test', { method: 'POST', body: JSON.stringify(payload) });
 }
+export function fetchOfficialWhatsAppTemplates() { return request('/whatsapp/templates/official').then(unwrapData); }
+export function fetchOfficialWhatsAppTemplate(id) { return request(`/whatsapp/templates/official/${id}`).then(unwrapData); }
+export function createOfficialWhatsAppTemplate(payload) { return request('/whatsapp/templates/official', { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function updateOfficialWhatsAppTemplate(id, payload) { return request(`/whatsapp/templates/official/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }).then(unwrapData); }
+export function archiveOfficialWhatsAppTemplate(id) { return request(`/whatsapp/templates/official/${id}`, { method: 'DELETE' }); }
+export function submitOfficialWhatsAppTemplate(id) { return request(`/whatsapp/templates/official/${id}/submit`, { method: 'POST', body: JSON.stringify({}) }).then(unwrapData); }
+export function syncOfficialWhatsAppTemplates() { return request('/whatsapp/templates/official/sync', { method: 'POST', body: JSON.stringify({}) }).then(unwrapData); }
+export function previewOfficialWhatsAppTemplate(payload) { return request('/whatsapp/templates/preview', { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function sendOfficialWhatsAppTemplate(payload) { return request('/whatsapp/templates/send', { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function fetchWhatsAppTemplateSettings() { return request('/whatsapp/template-settings').then(unwrapData); }
+export function updateWhatsAppTemplateSettings(payload) { return request('/whatsapp/template-settings', { method: 'PUT', body: JSON.stringify(payload) }).then(unwrapData); }
+export function fetchWhatsAppMessages(params = {}) {
+  const query = toQuery(params);
+  return request(`/whatsapp/messages${query ? `?${query}` : ''}`).then(unwrapData);
+}
+export function fetchWhatsAppMessage(id) { return request(`/whatsapp/messages/${id}`).then(unwrapData); }
+export function fetchWhatsAppMessageEvents(id) { return request(`/whatsapp/messages/${id}/events`).then(unwrapData); }
+export function fetchWhatsAppWebhookEvents(params = {}) {
+  const query = toQuery(params);
+  return request(`/whatsapp/webhook-events${query ? `?${query}` : ''}`).then(unwrapData);
+}
+export function reprocessWhatsAppWebhookEvent(id) { return request(`/whatsapp/webhook-events/${id}/reprocess`, { method: 'POST', body: JSON.stringify({}) }).then(unwrapData); }
+export function fetchParentCommunications(params = {}) {
+  const query = toQuery(params);
+  return request(`/parent-communication${query ? `?${query}` : ''}`);
+}
+export function fetchParentCommunication(id) { return request(`/parent-communication/${id}`).then(unwrapData); }
+export function sendParentWhatsApp(payload) { return request('/parent-communication/send-whatsapp', { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function logParentCall(payload) { return request('/parent-communication/log-call', { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function createParentManualNote(payload) { return request('/parent-communication/manual-note', { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function createParentCommunicationFollowup(id, payload) { return request(`/parent-communication/${id}/follow-up`, { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function assignParentCommunication(id, assignedToUserId) { return request(`/parent-communication/${id}/assign`, { method: 'PATCH', body: JSON.stringify({ assignedToUserId }) }).then(unwrapData); }
+export function markParentCommunicationReviewed(id, reviewed = true) { return request(`/parent-communication/${id}/mark-reviewed`, { method: 'PATCH', body: JSON.stringify({ reviewed }) }).then(unwrapData); }
 
 export function fetchMessageTemplates() {
   return request('/message-templates');
@@ -890,6 +938,57 @@ export function approveAttendanceCorrection(id) {
 export function rejectAttendanceCorrection(id) {
   return request(`/attendance/corrections/${id}/reject`, { method: 'PATCH', body: JSON.stringify({}) });
 }
+export function fetchTeacherAttendanceToday(date) {
+  return request(`/teacher/attendance/today${date ? `?date=${encodeURIComponent(date)}` : ''}`).then(unwrapData);
+}
+export function saveAttendanceDraft(sessionId, records) {
+  return request(`/attendance/sessions/${sessionId}/draft`, { method: 'PATCH', body: JSON.stringify({ records }) });
+}
+export function submitAttendanceSession(sessionId, records) {
+  return request(`/attendance/sessions/${sessionId}/submit`, { method: 'POST', body: JSON.stringify({ records }) });
+}
+export function fetchAttendanceCalendar(params = {}) {
+  const query = toQuery(params);
+  return request(`/attendance/calendar${query ? `?${query}` : ''}`).then(unwrapData);
+}
+export function recalculateAttendanceRisk(payload = {}) {
+  return request('/attendance/risk/recalculate', { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData);
+}
+export function fetchAttendanceRisk(params = {}) {
+  const query = toQuery(params);
+  return request(`/reports/attendance-risk${query ? `?${query}` : ''}`).then(unwrapData);
+}
+export function runAttendanceAutoFollowups() {
+  return request('/attendance/auto-followups/run', { method: 'POST', body: JSON.stringify({}) }).then(unwrapData);
+}
+export function sendAttendanceParentAlerts(sessionId) {
+  return request(`/attendance/sessions/${sessionId}/send-parent-alerts`, { method: 'POST', body: JSON.stringify({}) }).then(unwrapData);
+}
+export function recalculateTeacherAttendanceCompletion(payload = {}) {
+  return request('/attendance/teacher-completion/recalculate', { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData);
+}
+export function fetchTeacherAttendanceCompletion(params = {}) {
+  const query = toQuery(params);
+  return request(`/reports/teacher-attendance-completion${query ? `?${query}` : ''}`).then(unwrapData);
+}
+
+export function fetchTeacherScorecards(params = {}) {
+  const query = toQuery(params);
+  return request(`/teacher-scorecards${query ? `?${query}` : ''}`).then(unwrapData);
+}
+export function fetchTeacherScorecard(teacherId, params = {}) {
+  const query = toQuery(params);
+  return request(`/teacher-scorecards/${teacherId}${query ? `?${query}` : ''}`).then(unwrapData);
+}
+export function fetchTeacherScoreHistory(teacherId) { return request(`/teacher-scorecards/${teacherId}/history`).then(unwrapData); }
+export function recalculateTeacherScore(teacherId, payload) { return request(`/teacher-scorecards/${teacherId}/recalculate`, { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function recalculateAllTeacherScores(payload) { return request('/teacher-scorecards/recalculate', { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function fetchTeacherScoreConfig() { return request('/teacher-scorecards/config').then(unwrapData); }
+export function updateTeacherScoreConfig(payload) { return request('/teacher-scorecards/config', { method: 'PATCH', body: JSON.stringify(payload) }).then(unwrapData); }
+export function addTeacherScoreReviewNote(teacherId, payload) { return request(`/teacher-scorecards/${teacherId}/review-notes`, { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function createTeacherImprovementPlan(teacherId, payload) { return request(`/teacher-scorecards/${teacherId}/improvement-plans`, { method: 'POST', body: JSON.stringify(payload) }).then(unwrapData); }
+export function updateTeacherImprovementPlan(id, payload) { return request(`/teacher-scorecards/improvement-plans/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }).then(unwrapData); }
+export function fetchTeacherScoreAuditLog(teacherId) { return request(`/teacher-scorecards/${teacherId}/audit-log`).then(unwrapData); }
 
 export function fetchTeachers() {
   return request('/teachers');

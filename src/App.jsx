@@ -7,6 +7,7 @@ import Admissions from './pages/Admissions';
 import Academic from './pages/Academic';
 import AiLab from './pages/AiLab';
 import Attendance from './pages/Attendance';
+import AttendanceOperations from './pages/AttendanceOperations';
 import Automation from './pages/Automation';
 import Dashboard from './pages/Dashboard';
 import EnquiryPage from './pages/EnquiryPage';
@@ -17,11 +18,17 @@ import FeeStructuresPage from './pages/FeeStructuresPage';
 import FollowUps from './pages/FollowUps';
 import OntologyAdmin from './pages/Ontology';
 import ParentPortal from './pages/ParentPortal';
+import ParentCommunicationCenter from './pages/ParentCommunicationCenter';
 import Reports from './pages/Reports';
 import Students from './pages/Students';
+import StudentProfilePage from './pages/StudentProfile';
 import TeacherPerformance from './pages/TeacherPerformance';
+import TeacherScoreDashboard from './pages/TeacherScoreDashboard';
+import TeacherScoreDetail from './pages/TeacherScoreDetail';
 import Teachers from './pages/Teachers';
 import TestPerformance from './pages/TestPerformance';
+import WhatsAppTemplatesPage from './pages/WhatsAppTemplates';
+import WhatsAppSendHistoryPage from './pages/WhatsAppSendHistory';
 import SuperAdminLayout from './pages/super-admin/SuperAdminLayout';
 import OverviewPage from './pages/super-admin/OverviewPage';
 import InstitutesPage from './pages/super-admin/InstitutesPage';
@@ -61,14 +68,21 @@ function AppRoutes() {
         <Route path="/dashboard" element={<ModuleRoute moduleName="dashboard"><Dashboard /></ModuleRoute>} />
         <Route path="/teachers" element={<ModuleRoute moduleName="teachers"><Teachers /></ModuleRoute>} />
         <Route path="/students" element={<ModuleRoute moduleName="students"><Students /></ModuleRoute>} />
+        <Route path="/students/:id" element={<ModuleRoute moduleName="students"><StudentProfilePage /></ModuleRoute>} />
         <Route path="/admissions" element={<ModuleRoute moduleName="admissions"><Admissions /></ModuleRoute>} />
         <Route path="/attendance" element={<ModuleRoute moduleName="attendance"><Attendance /></ModuleRoute>} />
+        <Route path="/attendance/mobile" element={<ModuleRoute moduleName="attendance"><AttendanceOperations /></ModuleRoute>} />
+        <Route path="/attendance/calendar" element={<ModuleRoute moduleName="attendance"><AttendanceOperations /></ModuleRoute>} />
+        <Route path="/reports/attendance-risk" element={<ModuleRoute moduleName="attendance"><AttendanceOperations /></ModuleRoute>} />
+        <Route path="/reports/teacher-attendance-completion" element={<ModuleRoute moduleName="attendance"><AttendanceOperations /></ModuleRoute>} />
         <Route path="/academic" element={<ModuleRoute moduleName="academic"><Academic /></ModuleRoute>} />
         <Route path="/academic/batches" element={<ModuleRoute moduleName="academicMasters"><BatchesPage /></ModuleRoute>} />
         <Route path="/academic/batches/:id" element={<ModuleRoute moduleName="academicMasters"><BatchDetailPage /></ModuleRoute>} />
         <Route path="/settings/branches" element={<ModuleRoute moduleName="academicMasters"><BranchesPage /></ModuleRoute>} />
         <Route path="/settings/courses" element={<ModuleRoute moduleName="academicMasters"><CoursesPage /></ModuleRoute>} />
         <Route path="/settings/subjects" element={<ModuleRoute moduleName="academicMasters"><SubjectsPage /></ModuleRoute>} />
+        <Route path="/settings/whatsapp/templates" element={<ModuleRoute moduleName="automation"><WhatsAppTemplatesPage /></ModuleRoute>} />
+        <Route path="/settings/whatsapp/send-history" element={<ModuleRoute moduleName="automation"><WhatsAppSendHistoryPage /></ModuleRoute>} />
         <Route path="/test-performance" element={<ModuleRoute moduleName="tests"><TestPerformance /></ModuleRoute>} />
         <Route path="/automation" element={<ModuleRoute moduleName="automation"><Automation /></ModuleRoute>} />
         <Route path="/ai-lab" element={<ModuleRoute moduleName="aiLab"><AiLab /></ModuleRoute>} />
@@ -78,7 +92,10 @@ function AppRoutes() {
         <Route path="/expenses" element={<ModuleRoute moduleName="expenses"><Expenses /></ModuleRoute>} />
         <Route path="/reports" element={<ModuleRoute moduleName="reports"><Reports /></ModuleRoute>} />
         <Route path="/parent-portal" element={<ModuleRoute moduleName="parentPortal"><ParentPortal /></ModuleRoute>} />
+        <Route path="/communication/parents" element={<ModuleRoute moduleName="students"><ParentCommunicationCenter /></ModuleRoute>} />
         <Route path="/teacher-performance" element={<ModuleRoute moduleName="teacherPerformance"><TeacherPerformance /></ModuleRoute>} />
+        <Route path="/teacher-score" element={<ModuleRoute moduleName="teacherPerformance"><TeacherScoreDashboard /></ModuleRoute>} />
+        <Route path="/teacher-score/:teacherId" element={<ModuleRoute moduleName="teacherPerformance"><TeacherScoreDetail /></ModuleRoute>} />
         <Route path="/ontology" element={<ModuleRoute moduleName="ontology"><OntologyAdmin /></ModuleRoute>} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Route>

@@ -2481,6 +2481,854 @@ async function migrateAcademicMasterData() {
   }
 }
 
+async function migrateStudentProfiles() {
+  const studentColumns = [
+    ['student_code', 'TEXT'],
+    ['first_name', 'TEXT'],
+    ['middle_name', 'TEXT'],
+    ['last_name', 'TEXT'],
+    ['display_name', 'TEXT'],
+    ['gender', 'TEXT'],
+    ['date_of_birth', 'TEXT'],
+    ['student_phone', 'TEXT'],
+    ['student_email', 'TEXT'],
+    ['address', 'TEXT'],
+    ['admission_date', 'TEXT'],
+    ['deleted_at', 'TEXT'],
+  ];
+  for (const [column, definition] of studentColumns) {
+    await addColumnIfMissing('students', column, definition);
+  }
+  await addColumnIfMissing('student_history', 'tenant_id', 'INTEGER');
+  await addColumnIfMissing('follow_up_tasks', 'tenant_id', 'INTEGER');
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS student_guardians (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      student_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      relationship TEXT NOT NULL DEFAULT 'GUARDIAN',
+      phone TEXT,
+      alternate_phone TEXT,
+      email TEXT,
+      occupation TEXT,
+      address TEXT,
+      is_primary INTEGER NOT NULL DEFAULT 0,
+      is_emergency_contact INTEGER NOT NULL DEFAULT 0,
+      can_receive_notifications INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS student_documents (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      student_id TEXT NOT NULL,
+      document_type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      file_url TEXT NOT NULL,
+      file_name TEXT,
+      mime_type TEXT,
+      file_size INTEGER,
+      uploaded_by_user_id TEXT,
+      verified_by_user_id TEXT,
+      verified_at TEXT,
+      status TEXT NOT NULL DEFAULT 'UPLOADED',
+      notes TEXT,
+      archived_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS communication_events (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      student_id TEXT,
+      guardian_id TEXT,
+      lead_id TEXT,
+      admission_id TEXT,
+      channel TEXT NOT NULL,
+      direction TEXT NOT NULL DEFAULT 'OUTBOUND',
+      event_type TEXT NOT NULL,
+      subject TEXT,
+      message TEXT,
+      status TEXT NOT NULL DEFAULT 'LOGGED',
+      provider TEXT,
+      provider_message_id TEXT,
+      sent_by_user_id TEXT,
+      sent_at TEXT,
+      delivered_at TEXT,
+      read_at TEXT,
+      failed_at TEXT,
+      metadata TEXT DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_students_tenant_code ON students (tenant_id, student_code) WHERE student_code IS NOT NULL`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_student_guardians_student ON student_guardians (tenant_id, student_id, is_primary)`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_student_guardians_primary ON student_guardians (tenant_id, student_id) WHERE is_primary = 1`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_student_documents_student ON student_documents (tenant_id, student_id, archived_at, created_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_communication_events_student ON communication_events (tenant_id, student_id, created_at)`);
+
+  const tenants = await all(`SELECT id FROM tenants`);
+  for (const tenant of tenants) {
+    await run(
+      `UPDATE student_history SET tenant_id = ?
+       WHERE tenant_id IS NULL AND student_id IN (SELECT id FROM students WHERE tenant_id = ?)`,
+      [tenant.id, tenant.id]
+    );
+    await run(
+      `UPDATE follow_up_tasks SET tenant_id = ?
+       WHERE tenant_id IS NULL AND student_id IN (SELECT id FROM students WHERE tenant_id = ?)`,
+      [tenant.id, tenant.id]
+    );
+    const students = await all(`SELECT * FROM students WHERE tenant_id = ? ORDER BY id`, [tenant.id]);
+    for (const student of students) {
+      let legacy = {};
+      try { legacy = student.data ? JSON.parse(student.data) : {}; } catch (error) { legacy = {}; }
+      const displayName = student.display_name || student.student_name || student.name || 'Student';
+      const nameParts = String(displayName).trim().split(/\s+/);
+      const studentCode = student.student_code || `STU-${String(tenant.id).padStart(3, '0')}-${String(student.id).padStart(5, '0')}`;
+      await run(
+        `UPDATE students SET
+          student_code = COALESCE(student_code, ?),
+          first_name = COALESCE(first_name, ?),
+          last_name = COALESCE(last_name, ?),
+          display_name = COALESCE(display_name, ?),
+          student_phone = COALESCE(student_phone, ?),
+          student_email = COALESCE(student_email, ?),
+          address = COALESCE(address, ?),
+          admission_date = COALESCE(admission_date, ?),
+          status = UPPER(CASE
+            WHEN status IN ('Admitted', 'ACTIVE', 'Active') THEN 'ACTIVE'
+            WHEN status IN ('Enquiry', 'PROVISIONAL', 'Provisional') THEN 'PROVISIONAL'
+            WHEN status IN ('Dropout', 'DROPPED') THEN 'DROPPED'
+            ELSE COALESCE(status, 'ACTIVE')
+          END)
+         WHERE id = ? AND tenant_id = ?`,
+        [
+          studentCode,
+          nameParts[0] || displayName,
+          nameParts.length > 1 ? nameParts.slice(1).join(' ') : null,
+          displayName,
+          legacy.studentPhone || null,
+          legacy.studentEmail || null,
+          legacy.address || null,
+          legacy.joiningDate || null,
+          student.id,
+          tenant.id,
+        ]
+      );
+      const guardianName = student.parent_name || legacy.parentName || legacy.fatherName || legacy.motherName;
+      const guardianPhone = student.parent_phone || legacy.primaryPhone || legacy.whatsapp;
+      if (guardianName && guardianPhone) {
+        await run(
+          `INSERT INTO student_guardians
+            (id, tenant_id, student_id, name, relationship, phone, is_primary,
+             is_emergency_contact, can_receive_notifications, created_at, updated_at)
+           SELECT ?, ?, ?, ?, ?, ?, 1, 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+           WHERE NOT EXISTS (
+             SELECT 1 FROM student_guardians WHERE tenant_id = ? AND student_id = ? AND is_primary = 1
+           )`,
+          [
+            `guardian_${tenant.id}_${student.id}_primary`,
+            String(tenant.id),
+            String(student.id),
+            guardianName,
+            legacy.fatherName ? 'FATHER' : legacy.motherName ? 'MOTHER' : 'GUARDIAN',
+            guardianPhone,
+            String(tenant.id),
+            String(student.id),
+          ]
+        );
+      }
+    }
+  }
+  await run(`CREATE INDEX IF NOT EXISTS idx_student_history_tenant_student ON student_history (tenant_id, student_id, eventDate)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_follow_up_tasks_tenant_student ON follow_up_tasks (tenant_id, student_id, dueDate)`);
+}
+
+async function migrateAttendanceOperations() {
+  const sessionColumns = [
+    ['branch_id', 'TEXT'],
+    ['batch_id', 'TEXT'],
+    ['subject_id', 'TEXT'],
+    ['session_date', 'TEXT'],
+    ['start_time', 'TEXT'],
+    ['end_time', 'TEXT'],
+    ['session_type', "TEXT DEFAULT 'REGULAR_CLASS'"],
+    ['marked_by_user_id', 'TEXT'],
+    ['submitted_at', 'TEXT'],
+    ['locked_at', 'TEXT'],
+    ['total_students', 'INTEGER NOT NULL DEFAULT 0'],
+    ['present_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['absent_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['late_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['excused_count', 'INTEGER NOT NULL DEFAULT 0'],
+  ];
+  for (const [column, definition] of sessionColumns) await addColumnIfMissing('attendance_sessions', column, definition);
+
+  const recordColumns = [
+    ['branch_id', 'TEXT'],
+    ['batch_id', 'TEXT'],
+    ['marked_at', 'TEXT'],
+    ['marked_by_user_id', 'TEXT'],
+    ['absence_reason', 'TEXT'],
+    ['late_minutes', 'INTEGER NOT NULL DEFAULT 0'],
+    ['parent_alert_status', "TEXT DEFAULT 'NOT_REQUIRED'"],
+    ['parent_alert_sent_at', 'TEXT'],
+    ['created_at', 'TEXT'],
+    ['updated_at', 'TEXT'],
+  ];
+  for (const [column, definition] of recordColumns) await addColumnIfMissing('attendance_records', column, definition);
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS attendance_settings (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL UNIQUE,
+      send_absence_alert INTEGER NOT NULL DEFAULT 1,
+      send_late_alert INTEGER NOT NULL DEFAULT 0,
+      send_repeated_absence_alert INTEGER NOT NULL DEFAULT 1,
+      send_low_attendance_alert INTEGER NOT NULL DEFAULT 1,
+      low_attendance_threshold INTEGER NOT NULL DEFAULT 75,
+      repeated_absence_threshold INTEGER NOT NULL DEFAULT 3,
+      auto_followup_enabled INTEGER NOT NULL DEFAULT 1,
+      alert_channel TEXT NOT NULL DEFAULT 'WHATSAPP',
+      alert_delay_minutes INTEGER NOT NULL DEFAULT 5,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS attendance_risk_snapshots (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      branch_id TEXT,
+      student_id TEXT NOT NULL,
+      batch_id TEXT,
+      period_start TEXT NOT NULL,
+      period_end TEXT NOT NULL,
+      total_sessions INTEGER NOT NULL DEFAULT 0,
+      present_count INTEGER NOT NULL DEFAULT 0,
+      absent_count INTEGER NOT NULL DEFAULT 0,
+      late_count INTEGER NOT NULL DEFAULT 0,
+      excused_count INTEGER NOT NULL DEFAULT 0,
+      attendance_percentage REAL NOT NULL DEFAULT 0,
+      consecutive_absences INTEGER NOT NULL DEFAULT 0,
+      absences_last_7_days INTEGER NOT NULL DEFAULT 0,
+      absences_last_30_days INTEGER NOT NULL DEFAULT 0,
+      risk_level TEXT NOT NULL DEFAULT 'LOW',
+      risk_reason TEXT,
+      last_parent_alert_at TEXT,
+      last_followup_at TEXT,
+      next_followup_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (tenant_id, student_id, batch_id, period_start, period_end)
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS teacher_attendance_completion_scores (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      branch_id TEXT,
+      teacher_id TEXT NOT NULL,
+      period_start TEXT NOT NULL,
+      period_end TEXT NOT NULL,
+      scheduled_sessions INTEGER NOT NULL DEFAULT 0,
+      submitted_sessions INTEGER NOT NULL DEFAULT 0,
+      on_time_submissions INTEGER NOT NULL DEFAULT 0,
+      late_submissions INTEGER NOT NULL DEFAULT 0,
+      missed_sessions INTEGER NOT NULL DEFAULT 0,
+      correction_requests INTEGER NOT NULL DEFAULT 0,
+      completion_percentage REAL NOT NULL DEFAULT 0,
+      on_time_percentage REAL NOT NULL DEFAULT 0,
+      final_score REAL NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (tenant_id, teacher_id, period_start, period_end)
+    )`
+  );
+  const followUpColumns = [
+    ['source', "TEXT DEFAULT 'MANUAL'"],
+    ['source_entity_type', 'TEXT'],
+    ['source_entity_id', 'TEXT'],
+    ['risk_reason', 'TEXT'],
+  ];
+  for (const [column, definition] of followUpColumns) await addColumnIfMissing('follow_up_tasks', column, definition);
+
+  const tenants = await all(`SELECT id FROM tenants`);
+  for (const tenant of tenants) {
+    await run(
+      `INSERT INTO attendance_settings (id, tenant_id)
+       SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM attendance_settings WHERE tenant_id = ?)`,
+      [`attendance_settings_${tenant.id}`, String(tenant.id), String(tenant.id)]
+    );
+  }
+  await run(
+    `UPDATE attendance_sessions SET
+      session_date = COALESCE(session_date, date),
+      batch_id = COALESCE(batch_id, batch),
+      submitted_at = COALESCE(submitted_at, submittedAt),
+      locked_at = COALESCE(locked_at, lockedAt),
+      marked_by_user_id = COALESCE(marked_by_user_id, markedBy),
+      session_type = COALESCE(session_type, CASE
+        WHEN lectureType = 'Test' THEN 'TEST'
+        WHEN lectureType = 'Doubt' THEN 'DOUBT_SESSION'
+        WHEN lectureType = 'Revision' THEN 'REVISION'
+        ELSE 'REGULAR_CLASS' END),
+      status = UPPER(CASE
+        WHEN status = 'Submitted' THEN 'SUBMITTED'
+        WHEN status = 'Locked' THEN 'LOCKED'
+        WHEN status = 'Cancelled' THEN 'CANCELLED'
+        ELSE COALESCE(status, 'DRAFT') END)`
+  );
+  await run(
+    `UPDATE attendance_records SET
+      marked_at = COALESCE(marked_at, markedAt),
+      marked_by_user_id = COALESCE(marked_by_user_id, markedBy),
+      parent_alert_status = COALESCE(parent_alert_status, UPPER(REPLACE(alertStatus, ' ', '_'))),
+      parent_alert_sent_at = COALESCE(parent_alert_sent_at, CASE WHEN alertStatus = 'Sent' THEN updatedAt ELSE NULL END),
+      created_at = COALESCE(created_at, CAST(CURRENT_TIMESTAMP AS TEXT)),
+      updated_at = COALESCE(updated_at, updatedAt, CAST(CURRENT_TIMESTAMP AS TEXT)),
+      status = UPPER(REPLACE(COALESCE(status, 'NOT_MARKED'), ' ', '_'))`
+  );
+  await run(`CREATE INDEX IF NOT EXISTS idx_attendance_sessions_calendar ON attendance_sessions (tenant_id, session_date, batch_id, teacher_id, status)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_attendance_records_risk ON attendance_records (tenant_id, student_id, status, marked_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_attendance_risk_level ON attendance_risk_snapshots (tenant_id, risk_level, branch_id, batch_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_teacher_attendance_scores ON teacher_attendance_completion_scores (tenant_id, period_start, period_end, teacher_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_followup_attendance_dedupe ON follow_up_tasks (tenant_id, student_id, source, risk_reason, status)`);
+}
+
+async function migrateWhatsAppOfficialTemplates() {
+  await run(
+    `CREATE TABLE IF NOT EXISTS whatsapp_official_templates (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      template_key TEXT NOT NULL,
+      provider_template_name TEXT,
+      provider_template_id TEXT,
+      language_code TEXT NOT NULL DEFAULT 'en',
+      category TEXT NOT NULL DEFAULT 'UTILITY',
+      status TEXT NOT NULL DEFAULT 'LOCAL_DRAFT',
+      header_type TEXT,
+      header_text TEXT,
+      body_text TEXT NOT NULL,
+      footer_text TEXT,
+      button_config TEXT DEFAULT '[]',
+      variable_schema TEXT NOT NULL DEFAULT '[]',
+      sample_values TEXT DEFAULT '{}',
+      rejection_reason TEXT,
+      last_synced_at TEXT,
+      created_by_user_id TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (tenant_id, template_key, language_code)
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS whatsapp_template_messages (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      branch_id TEXT,
+      template_id TEXT NOT NULL,
+      template_key TEXT NOT NULL,
+      provider_template_name TEXT NOT NULL,
+      language_code TEXT NOT NULL,
+      student_id TEXT,
+      guardian_id TEXT,
+      lead_id TEXT,
+      admission_id TEXT,
+      fee_invoice_id TEXT,
+      fee_installment_id TEXT,
+      attendance_session_id TEXT,
+      test_id TEXT,
+      recipient_phone TEXT NOT NULL,
+      resolved_variables TEXT NOT NULL DEFAULT '[]',
+      rendered_preview TEXT,
+      provider_message_id TEXT,
+      status TEXT NOT NULL DEFAULT 'QUEUED',
+      error_code TEXT,
+      error_message TEXT,
+      sent_by_user_id TEXT,
+      sent_at TEXT,
+      delivered_at TEXT,
+      read_at TEXT,
+      failed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS whatsapp_template_settings (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL UNIQUE,
+      attendance_absent_enabled INTEGER NOT NULL DEFAULT 1,
+      fee_due_enabled INTEGER NOT NULL DEFAULT 1,
+      fee_overdue_enabled INTEGER NOT NULL DEFAULT 1,
+      payment_receipt_enabled INTEGER NOT NULL DEFAULT 1,
+      test_result_enabled INTEGER NOT NULL DEFAULT 1,
+      weekly_report_enabled INTEGER NOT NULL DEFAULT 0,
+      admission_followup_enabled INTEGER NOT NULL DEFAULT 1,
+      default_language_code TEXT NOT NULL DEFAULT 'en',
+      send_to_primary_guardian_only INTEGER NOT NULL DEFAULT 1,
+      allow_bulk_send INTEGER NOT NULL DEFAULT 0,
+      require_manual_approval_before_bulk_send INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(`CREATE INDEX IF NOT EXISTS idx_whatsapp_templates_tenant_status ON whatsapp_official_templates (tenant_id, status, template_key)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_provider ON whatsapp_template_messages (provider_message_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_student ON whatsapp_template_messages (tenant_id, student_id, created_at)`);
+
+  const messageColumns = [
+    ['status_rank', 'INTEGER NOT NULL DEFAULT 0'],
+    ['replied_at', 'TEXT'],
+    ['provider_error_details', 'TEXT'],
+    ['last_webhook_payload', 'TEXT'],
+    ['last_status_at', 'TEXT'],
+    ['webhook_event_count', 'INTEGER NOT NULL DEFAULT 0'],
+  ];
+  for (const [column, definition] of messageColumns) await addColumnIfMissing('whatsapp_template_messages', column, definition);
+  const communicationColumns = [
+    ['replied_at', 'TEXT'],
+    ['error_code', 'TEXT'],
+    ['error_message', 'TEXT'],
+  ];
+  for (const [column, definition] of communicationColumns) await addColumnIfMissing('communication_events', column, definition);
+  await run(
+    `CREATE TABLE IF NOT EXISTS whatsapp_webhook_events (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      event_type TEXT NOT NULL DEFAULT 'UNKNOWN',
+      provider_message_id TEXT,
+      provider_inbound_message_id TEXT,
+      provider_phone_number_id TEXT,
+      recipient_phone TEXT,
+      sender_phone TEXT,
+      status TEXT,
+      provider_timestamp TEXT,
+      payload TEXT NOT NULL,
+      processed_at TEXT,
+      processing_status TEXT NOT NULL DEFAULT 'RECEIVED',
+      error_message TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(`CREATE INDEX IF NOT EXISTS idx_whatsapp_webhook_events_message ON whatsapp_webhook_events (provider_message_id, status, provider_timestamp)`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_webhook_inbound_unique ON whatsapp_webhook_events (provider_inbound_message_id) WHERE provider_inbound_message_id IS NOT NULL`);
+
+  const definitions = [
+    ['attendance_absent', 'attendance_absent', 'UTILITY', 'Dear Parent, {{1}} was absent on {{2}} for {{3}} - {{4}} class at {{5}}. For any clarification, please contact {{6}}.', [
+      ['student_name', 'student.displayName'], ['date', 'attendanceSession.sessionDate'], ['batch_name', 'batch.name'],
+      ['subject_name', 'subject.name'], ['institute_name', 'tenant.name'], ['branch_phone', 'branch.phone'],
+    ]],
+    ['fee_due', 'fee_due', 'UTILITY', 'Dear Parent, fee installment of ₹{{1}} for {{2}} is due on {{3}} for {{4}}. Pay here: {{5}} - {{6}}.', [
+      ['amount_due', 'installment.amountDue'], ['student_name', 'student.displayName'], ['due_date', 'installment.dueDate'],
+      ['course_name', 'course.name'], ['payment_link', 'paymentLink.url'], ['institute_name', 'tenant.name'],
+    ]],
+    ['fee_overdue', 'fee_overdue', 'UTILITY', 'Dear Parent, ₹{{1}} fee for {{2}} is overdue by {{3}} days. Original due date was {{4}}. Pay here: {{5}} or contact {{6}}.', [
+      ['overdue_amount', 'installment.amountDue'], ['student_name', 'student.displayName'], ['days_overdue', 'installment.daysOverdue'],
+      ['due_date', 'installment.dueDate'], ['payment_link', 'paymentLink.url'], ['branch_phone', 'branch.phone'],
+    ]],
+    ['payment_receipt', 'payment_receipt', 'UTILITY', 'Dear Parent, payment of ₹{{1}} for {{2}} has been received. Receipt No: {{3}}, Date: {{4}}. Pending balance: ₹{{5}}. Receipt: {{6}}.', [
+      ['paid_amount', 'payment.amount'], ['student_name', 'student.displayName'], ['receipt_number', 'receipt.number'],
+      ['payment_date', 'payment.date'], ['pending_balance', 'payment.pendingBalance'], ['receipt_link', 'receipt.url'],
+    ]],
+    ['test_result', 'test_result', 'UTILITY', 'Dear Parent, {{1}} scored {{2}}/{{3}} in {{4}} - {{5}}. Percentage: {{6}}%. Rank: {{7}}.', [
+      ['student_name', 'student.displayName'], ['marks_obtained', 'testResult.marksObtained'], ['total_marks', 'testResult.totalMarks'],
+      ['test_name', 'test.name'], ['subject_name', 'subject.name'], ['percentage', 'testResult.percentage'], ['rank', 'testResult.rank'],
+    ]],
+    ['weekly_report', 'weekly_report', 'UTILITY', 'Weekly report for {{1}}: {{2}}. Attendance: {{3}}%. Tests: {{4}}. Average score: {{5}}%. Pending fee: ₹{{6}}. Details: {{7}}.', [
+      ['student_name', 'student.displayName'], ['week_range', 'weeklyReport.weekRange'], ['attendance_percentage', 'weeklyReport.attendancePercentage'],
+      ['tests_count', 'weeklyReport.testsCount'], ['average_score', 'weeklyReport.averageScore'], ['pending_fee', 'weeklyReport.pendingFee'],
+      ['profile_link', 'weeklyReport.profileLink'],
+    ]],
+    ['admission_followup', 'admission_followup', 'UTILITY', 'Dear Parent, thank you for your enquiry for {{1}}. Our counsellor {{2}} will guide you for {{3}} at {{4}}. Follow-up date: {{5}}. Contact: {{6}}.', [
+      ['student_name', 'lead.studentName'], ['counsellor_name', 'counsellor.name'], ['course_name', 'course.name'],
+      ['branch_name', 'branch.name'], ['followup_date', 'followup.date'], ['contact_number', 'branch.phone'],
+    ]],
+  ];
+  const tenants = await all(`SELECT id FROM tenants`);
+  for (const tenant of tenants) {
+    await run(
+      `INSERT INTO whatsapp_template_settings (id, tenant_id)
+       SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM whatsapp_template_settings WHERE tenant_id = ?)`,
+      [`wa_settings_${tenant.id}`, String(tenant.id), String(tenant.id)]
+    );
+    for (const [key, providerName, category, body, variables] of definitions) {
+      const schema = variables.map(([name, source], index) => ({ position: index + 1, name, source, required: true }));
+      const samples = Object.fromEntries(variables.map(([name]) => [name, `Sample ${name.replaceAll('_', ' ')}`]));
+      await run(
+        `INSERT INTO whatsapp_official_templates
+          (id, tenant_id, template_key, provider_template_name, language_code, category,
+           status, body_text, variable_schema, sample_values, created_by_user_id,
+           created_at, updated_at)
+         SELECT ?, ?, ?, ?, 'en', ?, 'LOCAL_DRAFT', ?, ?, ?, 'system',
+           CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+         WHERE NOT EXISTS (
+           SELECT 1 FROM whatsapp_official_templates
+           WHERE tenant_id = ? AND template_key = ? AND language_code = 'en'
+         )`,
+        [`wa_template_${tenant.id}_${key}`, String(tenant.id), key, providerName, category, body,
+          JSON.stringify(schema), JSON.stringify(samples), String(tenant.id), key]
+      );
+    }
+  }
+}
+
+async function migrateParentCommunicationCenter() {
+  const communicationColumns = [
+    ['branch_id', 'TEXT'],
+    ['related_entity_type', 'TEXT'],
+    ['related_entity_id', 'TEXT'],
+    ['assigned_to_user_id', 'TEXT'],
+    ['logged_at', 'TEXT'],
+    ['reviewed_at', 'TEXT'],
+    ['reviewed_by_user_id', 'TEXT'],
+    ['archived_at', 'TEXT'],
+    ['visibility', "TEXT NOT NULL DEFAULT 'STAFF'"],
+  ];
+  for (const [column, definition] of communicationColumns) await addColumnIfMissing('communication_events', column, definition);
+
+  const callColumns = [
+    ['tenant_id', 'INTEGER'],
+    ['deletedAt', 'TEXT'],
+    ['branch_id', 'TEXT'],
+    ['guardian_id', 'TEXT'],
+    ['lead_id', 'TEXT'],
+    ['phone_number', 'TEXT'],
+    ['call_direction', "TEXT DEFAULT 'OUTBOUND'"],
+    ['call_status', "TEXT DEFAULT 'COMPLETED'"],
+    ['purpose', 'TEXT'],
+    ['summary', 'TEXT'],
+    ['outcome', 'TEXT'],
+    ['next_action', 'TEXT'],
+    ['next_followup_at', 'TEXT'],
+    ['called_by_user_id', 'TEXT'],
+    ['call_started_at', 'TEXT'],
+    ['call_ended_at', 'TEXT'],
+    ['duration_seconds', 'INTEGER'],
+    ['updated_at', 'TEXT'],
+  ];
+  for (const [column, definition] of callColumns) await addColumnIfMissing('parent_call_logs', column, definition);
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS parent_manual_notes (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      branch_id TEXT,
+      student_id TEXT,
+      guardian_id TEXT,
+      lead_id TEXT,
+      communication_event_id TEXT,
+      note_type TEXT NOT NULL DEFAULT 'GENERAL',
+      subject TEXT,
+      note TEXT NOT NULL,
+      visibility TEXT NOT NULL DEFAULT 'STAFF',
+      created_by_user_id TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(
+    `UPDATE communication_events SET
+       branch_id = COALESCE(branch_id, (
+         SELECT CAST(s.branch_id AS TEXT) FROM students s
+         WHERE CAST(s.id AS TEXT) = CAST(communication_events.student_id AS TEXT)
+           AND CAST(s.tenant_id AS TEXT) = CAST(communication_events.tenant_id AS TEXT)
+       )),
+       logged_at = COALESCE(logged_at, sent_at, created_at)`
+  );
+  await run(
+    `UPDATE parent_call_logs SET
+       phone_number = COALESCE(phone_number, parentPhone),
+       outcome = COALESCE(outcome, callOutcome),
+       summary = COALESCE(summary, notes),
+       next_followup_at = COALESCE(next_followup_at, followUpDate),
+       called_by_user_id = COALESCE(called_by_user_id, calledBy),
+       call_started_at = COALESCE(call_started_at, calledAt),
+       updated_at = COALESCE(updated_at, createdAt, CAST(CURRENT_TIMESTAMP AS TEXT))`
+  );
+
+  await run(`CREATE INDEX IF NOT EXISTS idx_parent_communication_inbox ON communication_events (tenant_id, archived_at, logged_at, created_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_parent_communication_filters ON communication_events (tenant_id, branch_id, channel, event_type, status)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_parent_communication_assignee ON communication_events (tenant_id, assigned_to_user_id, reviewed_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_parent_manual_notes_student ON parent_manual_notes (tenant_id, student_id, created_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_parent_call_logs_student_normalized ON parent_call_logs (tenant_id, student_id, call_started_at)`);
+}
+
+async function migrateTeacherScore() {
+  await run(
+    `CREATE TABLE IF NOT EXISTS teacher_score_configs (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL UNIQUE,
+      attendance_weight REAL NOT NULL DEFAULT 15,
+      planning_weight REAL NOT NULL DEFAULT 10,
+      syllabus_weight REAL NOT NULL DEFAULT 15,
+      homework_weight REAL NOT NULL DEFAULT 10,
+      student_improvement_weight REAL NOT NULL DEFAULT 25,
+      doubt_support_weight REAL NOT NULL DEFAULT 10,
+      feedback_weight REAL NOT NULL DEFAULT 15,
+      max_complaint_penalty REAL NOT NULL DEFAULT 10,
+      minimum_feedback_responses INTEGER NOT NULL DEFAULT 10,
+      minimum_attendance_sessions INTEGER NOT NULL DEFAULT 5,
+      minimum_improvement_tests INTEGER NOT NULL DEFAULT 2,
+      on_time_attendance_buffer_minutes INTEGER NOT NULL DEFAULT 15,
+      allow_teacher_self_view INTEGER NOT NULL DEFAULT 1,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS teacher_score_snapshots (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      branch_id TEXT,
+      teacher_id TEXT NOT NULL,
+      period_start TEXT NOT NULL,
+      period_end TEXT NOT NULL,
+      period_type TEXT NOT NULL DEFAULT 'MONTHLY',
+      attendance_score REAL NOT NULL DEFAULT 0,
+      planning_score REAL NOT NULL DEFAULT 0,
+      syllabus_score REAL NOT NULL DEFAULT 0,
+      homework_score REAL NOT NULL DEFAULT 0,
+      student_improvement_score REAL NOT NULL DEFAULT 0,
+      doubt_support_score REAL NOT NULL DEFAULT 0,
+      feedback_score REAL NOT NULL DEFAULT 0,
+      complaint_penalty REAL NOT NULL DEFAULT 0,
+      final_score REAL NOT NULL DEFAULT 0,
+      grade TEXT NOT NULL DEFAULT 'NEEDS_REVIEW',
+      confidence_score REAL NOT NULL DEFAULT 0,
+      data_status TEXT NOT NULL DEFAULT 'PARTIAL',
+      calculated_by_user_id TEXT,
+      calculated_at TEXT NOT NULL,
+      locked_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (tenant_id, teacher_id, period_start, period_end, period_type)
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS teacher_score_components (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      teacher_score_snapshot_id TEXT NOT NULL,
+      teacher_id TEXT NOT NULL,
+      metric_key TEXT NOT NULL,
+      category TEXT NOT NULL,
+      raw_value REAL NOT NULL DEFAULT 0,
+      raw_display TEXT,
+      target_value REAL NOT NULL DEFAULT 0,
+      score REAL NOT NULL DEFAULT 0,
+      weight REAL NOT NULL DEFAULT 0,
+      weighted_score REAL NOT NULL DEFAULT 0,
+      source_entity_type TEXT,
+      source_entity_ids TEXT NOT NULL DEFAULT '[]',
+      calculation_note TEXT,
+      evidence_available INTEGER NOT NULL DEFAULT 0,
+      minimum_data_met INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (teacher_score_snapshot_id, metric_key)
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS batch_syllabus_progress (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      branch_id TEXT,
+      batch_id TEXT,
+      course_id TEXT,
+      subject_id TEXT,
+      teacher_id TEXT NOT NULL,
+      topic_id TEXT,
+      topic_title TEXT,
+      planned_start_date TEXT,
+      planned_end_date TEXT,
+      actual_completed_date TEXT,
+      status TEXT NOT NULL DEFAULT 'NOT_STARTED',
+      completion_percentage REAL NOT NULL DEFAULT 0,
+      verified_by_user_id TEXT,
+      verified_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS homework_checks (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      homework_assignment_id TEXT NOT NULL,
+      student_id TEXT,
+      teacher_id TEXT NOT NULL,
+      checked_status TEXT NOT NULL DEFAULT 'PENDING',
+      checked_at TEXT,
+      remarks TEXT,
+      marks_or_grade TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS teacher_complaints (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      branch_id TEXT,
+      teacher_id TEXT NOT NULL,
+      student_id TEXT,
+      guardian_id TEXT,
+      batch_id TEXT,
+      subject_id TEXT,
+      complaint_type TEXT NOT NULL DEFAULT 'OTHER',
+      severity TEXT NOT NULL DEFAULT 'LOW',
+      description TEXT NOT NULL,
+      source_channel TEXT NOT NULL DEFAULT 'MANUAL',
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      reported_by_user_id TEXT,
+      reviewed_by_user_id TEXT,
+      reviewed_at TEXT,
+      resolved_by_user_id TEXT,
+      resolved_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS teacher_feedback_surveys (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      branch_id TEXT,
+      teacher_id TEXT NOT NULL,
+      batch_id TEXT,
+      subject_id TEXT,
+      survey_date TEXT NOT NULL,
+      period_start TEXT NOT NULL,
+      period_end TEXT NOT NULL,
+      average_rating REAL NOT NULL DEFAULT 0,
+      response_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS teacher_feedback_responses (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      survey_id TEXT NOT NULL,
+      teacher_id TEXT NOT NULL,
+      student_id TEXT,
+      clarity_rating REAL,
+      pace_rating REAL,
+      doubt_solving_rating REAL,
+      discipline_rating REAL,
+      homework_rating REAL,
+      overall_rating REAL NOT NULL,
+      comment TEXT,
+      is_anonymous INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS teacher_improvement_plans (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      branch_id TEXT,
+      teacher_id TEXT NOT NULL,
+      teacher_score_snapshot_id TEXT,
+      period_start TEXT,
+      period_end TEXT,
+      problem_area TEXT NOT NULL,
+      goal TEXT NOT NULL,
+      action_plan TEXT NOT NULL,
+      assigned_by_user_id TEXT,
+      assigned_to_user_id TEXT,
+      review_date TEXT,
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS teacher_score_review_notes (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      teacher_score_snapshot_id TEXT NOT NULL,
+      teacher_id TEXT NOT NULL,
+      note TEXT NOT NULL,
+      reviewed_by_user_id TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+  await run(
+    `CREATE TABLE IF NOT EXISTS teacher_score_alerts (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      branch_id TEXT,
+      teacher_id TEXT NOT NULL,
+      teacher_score_snapshot_id TEXT NOT NULL,
+      alert_type TEXT NOT NULL,
+      severity TEXT NOT NULL DEFAULT 'MEDIUM',
+      message TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      resolved_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (teacher_score_snapshot_id, alert_type)
+    )`
+  );
+
+  const lectureColumns = [
+    ['tenant_id', 'INTEGER'], ['branch_id', 'TEXT'], ['batch_id', 'TEXT'], ['subject_id', 'TEXT'],
+    ['plan_date', 'TEXT'], ['title', 'TEXT'], ['objectives', 'TEXT'], ['teaching_method', 'TEXT'],
+    ['resources_required', 'TEXT'], ['created_by_user_id', 'TEXT'], ['completed_at', 'TEXT'],
+    ['verified_by_user_id', 'TEXT'], ['verified_at', 'TEXT'],
+  ];
+  for (const [column, definition] of lectureColumns) await addColumnIfMissing('lecture_plans', column, definition);
+  const homeworkColumns = [
+    ['tenant_id', 'INTEGER'], ['branch_id', 'TEXT'], ['teacher_id', 'TEXT'], ['batch_id', 'TEXT'],
+    ['subject_id', 'TEXT'], ['assigned_date', 'TEXT'], ['due_date', 'TEXT'], ['total_students', 'INTEGER'],
+    ['submitted_count', 'INTEGER'], ['checked_count', 'INTEGER'], ['checked_on_time_count', 'INTEGER'],
+  ];
+  for (const [column, definition] of homeworkColumns) await addColumnIfMissing('homework_assignments', column, definition);
+  const doubtColumns = [
+    ['tenant_id', 'INTEGER'], ['branch_id', 'TEXT'], ['batch_id', 'TEXT'], ['subject_id', 'TEXT'],
+    ['session_date', 'TEXT'], ['start_time', 'TEXT'], ['end_time', 'TEXT'], ['student_count', 'INTEGER'],
+    ['resolved_count', 'INTEGER'],
+  ];
+  for (const [column, definition] of doubtColumns) await addColumnIfMissing('doubt_sessions', column, definition);
+  await addColumnIfMissing('student_test_results', 'tenant_id', 'INTEGER');
+
+  await run(`UPDATE lecture_plans SET plan_date = COALESCE(plan_date, date), title = COALESCE(title, topic), tenant_id = COALESCE(tenant_id, (SELECT tenant_id FROM teachers WHERE teachers.id = lecture_plans.teacher_id))`);
+  await run(`UPDATE homework_assignments SET assigned_date = COALESCE(assigned_date, date), due_date = COALESCE(due_date, dueDate), total_students = COALESCE(total_students, totalCount), submitted_count = COALESCE(submitted_count, submittedCount), checked_count = COALESCE(checked_count, submittedCount - pendingStudents)`);
+  await run(`UPDATE doubt_sessions SET session_date = COALESCE(session_date, date), student_count = COALESCE(student_count, studentsAssigned), tenant_id = COALESCE(tenant_id, (SELECT tenant_id FROM teachers WHERE teachers.id = doubt_sessions.teacher_id))`);
+  await run(`UPDATE student_test_results SET tenant_id = COALESCE(tenant_id, (SELECT tenant_id FROM students WHERE students.id = student_test_results.student_id))`);
+
+  const tenants = await all(`SELECT id FROM tenants`);
+  for (const tenant of tenants) {
+    await run(
+      `INSERT INTO teacher_score_configs (id, tenant_id)
+       SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM teacher_score_configs WHERE tenant_id = ?)`,
+      [`teacher_score_config_${tenant.id}`, String(tenant.id), String(tenant.id)]
+    );
+  }
+  await run(`CREATE INDEX IF NOT EXISTS idx_teacher_score_snapshots_teacher ON teacher_score_snapshots (tenant_id, teacher_id, period_end)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_teacher_score_components_snapshot ON teacher_score_components (tenant_id, teacher_score_snapshot_id, category)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_teacher_complaints_period ON teacher_complaints (tenant_id, teacher_id, created_at, status)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_teacher_feedback_period ON teacher_feedback_surveys (tenant_id, teacher_id, period_start, period_end)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_teacher_improvement_plans ON teacher_improvement_plans (tenant_id, teacher_id, status, review_date)`);
+}
+
 function cryptoHash(value) {
   return require('crypto').createHash('sha1').update(String(value)).digest('hex').slice(0, 16);
 }
@@ -3245,6 +4093,11 @@ async function migrate() {
   await migrateAuthColumns();
   await migrateTenantOnboarding();
   await migrateAcademicMasterData();
+  await migrateStudentProfiles();
+  await migrateAttendanceOperations();
+  await migrateWhatsAppOfficialTemplates();
+  await migrateParentCommunicationCenter();
+  await migrateTeacherScore();
   await migrateFeeStructureTemplates();
   await migrateFeeFlowHardening();
   await migrateSuperAdmin();
@@ -3274,6 +4127,11 @@ module.exports = {
   migrateFeeFlowHardening,
   migrateTenantOnboarding,
   migrateAcademicMasterData,
+  migrateStudentProfiles,
+  migrateAttendanceOperations,
+  migrateWhatsAppOfficialTemplates,
+  migrateParentCommunicationCenter,
+  migrateTeacherScore,
   migrateSuperAdmin,
   migrateAdmissionRealColumns,
   migrateMarketingCampaigns,

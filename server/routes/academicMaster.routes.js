@@ -391,7 +391,9 @@ router.get('/batches/:id', authMiddleware, requireTenant, requireAnyRole(VIEW_RO
   if (!batch) return res.status(404).json({ error: 'Batch not found' });
   const [students, teachers, timings] = await Promise.all([
     all(
-      `SELECT bs.*, s.name AS "studentName", s.grade AS "classLevel"
+      `SELECT bs.*, COALESCE(s.student_name, s.name) AS "studentName",
+        COALESCE(s.class_level, s.grade) AS "classLevel",
+        s.parent_phone AS "parentPhone"
        FROM batch_students bs JOIN students s ON CAST(s.id AS TEXT) = CAST(bs.student_id AS TEXT)
        WHERE bs.batch_id = ? AND bs.tenant_id = ? ORDER BY s.name`,
       [batch.id, tenantId(req)]
@@ -431,6 +433,9 @@ router.patch('/batches/:id', authMiddleware, requireTenant, requireAnyRole(MANAG
     if (!old) return res.status(404).json({ error: 'Batch not found' });
     const next = { ...serialize(old), ...req.body };
     const batchCode = code(next.code);
+    if (!String(next.name || '').trim()) throw new Error('Batch name is required');
+    if (!batchCode) throw new Error('Batch code is required');
+    if (!String(next.academicYear || '').trim()) throw new Error('Academic year is required');
     if (await uniqueCode('batches', tenantId(req), batchCode, old.id)) throw new Error('Batch code already exists');
     if (Number(next.capacity) <= 0) throw new Error('Capacity must be greater than 0');
     if (Number(next.capacity) < Number(old.studentCount || 0) && !req.body.capacityOverride) {
@@ -440,7 +445,8 @@ router.patch('/batches/:id', authMiddleware, requireTenant, requireAnyRole(MANAG
     if (!BATCH_STATUSES.has(String(next.status).toUpperCase())) throw new Error('Invalid batch status');
     const branch = await get(`SELECT * FROM branches WHERE id = ? AND tenant_id = ?`, [next.branchId, tenantId(req)]);
     const course = await get(`SELECT * FROM courses WHERE id = ? AND tenant_id = ?`, [next.courseId, tenantId(req)]);
-    if (!branch || !course) throw new Error('Branch and course are required');
+    if (!branch || Number(branch.is_active ?? branch.isActive) !== 1) throw new Error('Active branch is required');
+    if (!course || Number(course.is_active ?? course.isActive) !== 1) throw new Error('Active course is required');
     await run(
       `UPDATE batches SET branch_id = ?, course_id = ?, name = ?, code = ?, academic_year = ?,
        start_date = ?, end_date = ?, capacity = ?, status = ?, updated_at = CURRENT_TIMESTAMP
@@ -502,6 +508,9 @@ router.put('/batches/:batchId/timings', authMiddleware, requireTenant, requireAn
   try {
     const batch = await batchDetail(req.params.batchId, tenantId(req));
     if (!batch) return res.status(404).json({ error: 'Batch not found' });
+    if (!['PLANNED', 'ACTIVE'].includes(batch.status)) {
+      throw new Error('Only planned or active batches can accept timing changes');
+    }
     const data = await transaction(() => replaceBatchTimings(req, batch, req.body.timings || []));
     res.json({ data });
   } catch (error) {
@@ -534,6 +543,9 @@ router.post('/batches/:batchId/students', authMiddleware, requireTenant, require
         ? req.body.studentIds
         : [req.body.studentId].filter(Boolean);
       if (!studentIds.length) throw new Error('At least one studentId is required');
+      if (new Set(studentIds.map(String)).size !== studentIds.length) {
+        throw new Error('studentIds must not contain duplicates');
+      }
       const activeCount = Number(batch.studentCount || 0);
       if (activeCount + studentIds.length > Number(batch.capacity) && !req.body.capacityOverride) {
         throw new Error('Batch capacity reached; admin override is required');
@@ -569,9 +581,9 @@ router.post('/batches/:batchId/students', authMiddleware, requireTenant, require
         if (req.body.makePrimary !== false) {
           await run(
             `UPDATE students SET branch_id = ?, primary_course_id = ?, primary_batch_id = ?,
-             grade = COALESCE(?, grade), batch = ?, updated_at = CURRENT_TIMESTAMP
+             grade = COALESCE(?, grade), updated_at = CURRENT_TIMESTAMP
              WHERE id = ? AND tenant_id = ?`,
-            [batch.branch_id, batch.course_id, batch.id, batch.class_level || null, batch.name, student.id, tenantId(req)]
+            [batch.branch_id, batch.course_id, batch.id, batch.class_level || null, student.id, tenantId(req)]
           );
         }
         await audit(req, 'STUDENT_ADDED_TO_BATCH', 'batch_student', id, {}, { batchId: batch.id, studentId: student.id }, batch.branch_id);
@@ -633,9 +645,9 @@ router.post('/batches/:batchId/students/:studentId/transfer', authMiddleware, re
         [id, tenantId(req), target.id, req.params.studentId, req.body.joinedAt || new Date().toISOString().slice(0, 10)]
       );
       await run(
-        `UPDATE students SET branch_id = ?, primary_course_id = ?, primary_batch_id = ?, batch = ?,
+        `UPDATE students SET branch_id = ?, primary_course_id = ?, primary_batch_id = ?,
          updated_at = CURRENT_TIMESTAMP WHERE id = ? AND tenant_id = ?`,
-        [target.branch_id, target.course_id, target.id, target.name, req.params.studentId, tenantId(req)]
+        [target.branch_id, target.course_id, target.id, req.params.studentId, tenantId(req)]
       );
       await audit(req, 'STUDENT_TRANSFERRED_BATCH', 'batch_student', id,
         { batchId: source.id, studentId: req.params.studentId },

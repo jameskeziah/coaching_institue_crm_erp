@@ -337,6 +337,57 @@ async function main() {
   if (!['BATCH_CREATED', 'BATCH_TIMING_UPDATED', 'BATCH_DEACTIVATED', 'BATCH_ACTIVATED'].every((action) => batchAuditActions.has(action))) {
     throw new Error('Batch audit trail is incomplete');
   }
+  const guardian = await request(`/students/${student.id}/guardians`, withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Smoke Parent',
+      relationship: 'FATHER',
+      phone: smokePhone,
+      email: `parent-${suffix}@example.com`,
+      isPrimary: true,
+      isEmergencyContact: true,
+      canReceiveNotifications: true,
+    }),
+  }));
+  if (!guardian.data?.id || !guardian.data?.isPrimary) throw new Error('Student guardian creation failed');
+  const document = await request(`/students/${student.id}/documents`, withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      documentType: 'AADHAAR',
+      title: 'Smoke Aadhaar',
+      fileUrl: `https://example.com/smoke-${suffix}.pdf`,
+      fileName: `smoke-${suffix}.pdf`,
+      mimeType: 'application/pdf',
+      fileSize: 1024,
+    }),
+  }));
+  if (!document.data?.id || document.data?.status !== 'UPLOADED') throw new Error('Student document creation failed');
+  await request(`/students/${student.id}/documents/${document.data.id}`, withAuth(token, {
+    method: 'PATCH',
+    body: JSON.stringify({ status: 'VERIFIED' }),
+  }));
+  const studentProfile = await request(`/students/${student.id}/profile`, withAuth(token));
+  if (studentProfile.data?.student?.studentCode == null
+    || studentProfile.data?.guardians?.length < 1
+    || studentProfile.data?.batchMemberships?.length < 1
+    || studentProfile.data?.documents?.length < 1
+    || !Array.isArray(studentProfile.data?.alerts)) {
+    throw new Error(`Student aggregate profile failed: ${JSON.stringify(studentProfile.data)}`);
+  }
+  const [studentAcademic, studentFees, studentAttendance, studentTests, studentCommunications] = await Promise.all([
+    request(`/students/${student.id}/academic`, withAuth(token)),
+    request(`/students/${student.id}/fees`, withAuth(token)),
+    request(`/students/${student.id}/attendance`, withAuth(token)),
+    request(`/students/${student.id}/tests`, withAuth(token)),
+    request(`/students/${student.id}/communications`, withAuth(token)),
+  ]);
+  if (!Array.isArray(studentAcademic.data?.batchMemberships)
+    || !studentFees.data?.summary
+    || !studentAttendance.data?.summary
+    || !studentTests.data?.summary
+    || !Array.isArray(studentCommunications.data)) {
+    throw new Error('Student profile tab endpoints failed');
+  }
 
   const history = await request(`/students/${student.id}/history`, withAuth(token, {
     method: 'POST',
@@ -392,6 +443,26 @@ async function main() {
   if (!followUpHistoryRows.some((row) => row.type === 'Follow-up Escalation' && /overdue/i.test(row.title || ''))) {
     throw new Error('Follow-up escalation was not written to student history');
   }
+
+  const officialTemplates = await request('/whatsapp/templates/official', withAuth(token));
+  if (!Array.isArray(officialTemplates.data) || officialTemplates.data.length < 7) {
+    throw new Error('Official WhatsApp template registry was not seeded');
+  }
+  const attendanceOfficialTemplate = officialTemplates.data.find((item) => item.templateKey === 'attendance_absent');
+  if (!attendanceOfficialTemplate) throw new Error('attendance_absent official template missing');
+  const unapprovedSend = await requestRaw('/whatsapp/templates/send', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ templateKey: 'attendance_absent', studentId: student.id }),
+  }));
+  if (unapprovedSend.response.status !== 400) throw new Error('Unapproved official WhatsApp template was allowed to send');
+  await request(`/whatsapp/templates/official/${attendanceOfficialTemplate.id}/submit`, withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  }));
+  await request('/whatsapp/templates/official/sync', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  }));
 
   const attendanceSession = await request('/attendance/sessions', withAuth(token, {
     method: 'POST',
@@ -456,6 +527,106 @@ async function main() {
   if (!attendanceReports.teacherWise?.length) throw new Error('Teacher-wise attendance report failed');
   if (!attendanceReports.teacherCompletion?.length) throw new Error('Teacher attendance completion report failed');
   if (!attendanceReports.parentAlertLogs?.length) throw new Error('Attendance parent alert report failed');
+  const attendanceCalendar = await request(`/attendance/calendar?batchId=${encodeURIComponent(batchMaster.data.id)}&month=6&year=2026`, withAuth(token));
+  if (!attendanceCalendar.data?.sessions?.some((row) => String(row.id) === String(attendanceSession.id) && row.status === 'SUBMITTED')) {
+    throw new Error('Attendance calendar did not include submitted session');
+  }
+  const teacherAttendanceToday = await request('/teacher/attendance/today?date=2026-06-04', withAuth(token));
+  if (!teacherAttendanceToday.data?.some((row) => String(row.id) === String(attendanceSession.id))) {
+    throw new Error('Teacher attendance today did not include session');
+  }
+  const recalculatedRisk = await request('/attendance/risk/recalculate', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ studentId: student.id, batchId: batchMaster.data.id }),
+  }));
+  if (!recalculatedRisk.data?.length || !recalculatedRisk.data[0].riskLevel) throw new Error('Attendance risk recalculation failed');
+  const attendanceRisk = await request(`/reports/attendance-risk?batchId=${encodeURIComponent(batchMaster.data.id)}`, withAuth(token));
+  if (!attendanceRisk.data?.some((row) => String(row.studentId) === String(student.id))) throw new Error('Attendance risk report failed');
+  const autoFollowups = await request('/attendance/auto-followups/run', withAuth(token, { method: 'POST', body: JSON.stringify({}) }));
+  if (!Array.isArray(autoFollowups.data)) throw new Error('Attendance auto follow-up run failed');
+  const completionRecalculation = await request('/attendance/teacher-completion/recalculate', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ teacherId: teacher.id, month: '2026-06' }),
+  }));
+  if (!completionRecalculation.data?.length) throw new Error('Teacher attendance completion recalculation failed');
+  const completionReport = await request('/reports/teacher-attendance-completion?month=2026-06', withAuth(token));
+  if (!completionReport.data?.some((row) => String(row.teacherId) === String(teacher.id))) {
+    throw new Error('Teacher attendance completion report failed');
+  }
+  const attendanceCommunications = await request(`/students/${student.id}/communications`, withAuth(token));
+  if (!attendanceCommunications.data?.some((row) => row.eventType === 'ATTENDANCE_ABSENT')) {
+    throw new Error('ParentPulse absence alert was not added to communication timeline');
+  }
+  const attendanceTemplateDetail = await request(`/whatsapp/templates/official/${attendanceOfficialTemplate.id}`, withAuth(token));
+  const attendanceTemplateSend = attendanceTemplateDetail.data?.sends?.find((row) => row.providerMessageId);
+  if (!attendanceTemplateSend) throw new Error('Official attendance template send log missing');
+  await request('/webhooks/whatsapp', {
+    method: 'POST',
+    body: JSON.stringify({
+      statuses: [{ id: attendanceTemplateSend.providerMessageId, status: 'delivered', timestamp: '1782261000', recipient_id: smokePhone }],
+    }),
+  });
+  const deliveredTemplateDetail = await request(`/whatsapp/templates/official/${attendanceOfficialTemplate.id}`, withAuth(token));
+  if (!deliveredTemplateDetail.data?.sends?.some((row) => row.providerMessageId === attendanceTemplateSend.providerMessageId && row.status === 'DELIVERED')) {
+    throw new Error('WhatsApp webhook did not update official template message status');
+  }
+  await request('/webhooks/whatsapp', {
+    method: 'POST',
+    body: JSON.stringify({
+      statuses: [{ id: attendanceTemplateSend.providerMessageId, status: 'read', timestamp: '1782261060', recipient_id: smokePhone }],
+    }),
+  });
+  await request('/webhooks/whatsapp', {
+    method: 'POST',
+    body: JSON.stringify({
+      statuses: [{ id: attendanceTemplateSend.providerMessageId, status: 'delivered', timestamp: '1782261000', recipient_id: smokePhone }],
+    }),
+  });
+  const readTemplateDetail = await request(`/whatsapp/templates/official/${attendanceOfficialTemplate.id}`, withAuth(token));
+  if (!readTemplateDetail.data?.sends?.some((row) => row.providerMessageId === attendanceTemplateSend.providerMessageId && row.status === 'READ' && row.deliveredAt && row.readAt)) {
+    throw new Error('WhatsApp status ordering downgraded READ or missed implied delivery');
+  }
+  const inboundMessageId = `wamid.inbound.${suffix}`;
+  await request('/webhooks/whatsapp', {
+    method: 'POST',
+    body: JSON.stringify({
+      metadata: { phone_number_id: 'local-phone' },
+      messages: [{
+        id: inboundMessageId,
+        from: smokePhone,
+        timestamp: '1782261120',
+        type: 'text',
+        text: { body: 'Acknowledged, thank you.' },
+        context: { id: attendanceTemplateSend.providerMessageId },
+      }],
+    }),
+  });
+  await request('/webhooks/whatsapp', {
+    method: 'POST',
+    body: JSON.stringify({
+      metadata: { phone_number_id: 'local-phone' },
+      messages: [{
+        id: inboundMessageId,
+        from: smokePhone,
+        timestamp: '1782261120',
+        type: 'text',
+        text: { body: 'Acknowledged, thank you.' },
+        context: { id: attendanceTemplateSend.providerMessageId },
+      }],
+    }),
+  });
+  const repliedTemplateDetail = await request(`/whatsapp/templates/official/${attendanceOfficialTemplate.id}`, withAuth(token));
+  if (!repliedTemplateDetail.data?.sends?.some((row) => row.providerMessageId === attendanceTemplateSend.providerMessageId && row.status === 'REPLIED' && row.repliedAt)) {
+    throw new Error('Inbound WhatsApp reply did not mark outbound message replied');
+  }
+  const studentWhatsAppTimeline = await request(`/students/${student.id}/whatsapp-timeline`, withAuth(token));
+  if (!studentWhatsAppTimeline.data?.some((row) => row.direction === 'INBOUND' && row.eventType === 'PARENT_REPLY' && row.providerMessageId === inboundMessageId)) {
+    throw new Error('Inbound WhatsApp reply missing from student timeline');
+  }
+  const webhookEvents = await request('/whatsapp/webhook-events', withAuth(token));
+  if (!webhookEvents.data?.some((row) => row.providerInboundMessageId === inboundMessageId && row.processingStatus === 'PROCESSED')) {
+    throw new Error('WhatsApp webhook event audit missing');
+  }
   await request(`/attendance/corrections/${correction.id}/approve`, withAuth(token, { method: 'PATCH', body: JSON.stringify({}) }));
 
   await request('/staff-attendance/check-in', withAuth(token, {
@@ -1108,6 +1279,21 @@ async function main() {
     }),
   }));
   if (!doubtSession.id) throw new Error('Academic doubt session creation failed');
+  const teacherScoreConfig = await request('/teacher-scorecards/config', withAuth(token));
+  if (!teacherScoreConfig.data?.id) throw new Error('TeacherScore config failed');
+  const teacherScore = await request(`/teacher-scorecards/${teacher.id}/recalculate`, withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      periodStart: '2026-06-01',
+      periodEnd: '2026-06-30',
+      periodType: 'MONTHLY',
+    }),
+  }));
+  if (!teacherScore.data?.id || teacherScore.data.components?.length !== 8) throw new Error('TeacherScore calculation failed');
+  const teacherScoreDashboard = await request('/teacher-scorecards', withAuth(token));
+  if (!teacherScoreDashboard.data?.some((row) => String(row.teacherId) === String(teacher.id))) throw new Error('TeacherScore dashboard failed');
+  const teacherScoreDetail = await request(`/teacher-scorecards/${teacher.id}`, withAuth(token));
+  if (!teacherScoreDetail.data?.components?.every((item) => item.calculationNote)) throw new Error('TeacherScore evidence drill-down failed');
   const revisionPlan = await request('/academic/revision-plans', withAuth(token, {
     method: 'POST',
     body: JSON.stringify({

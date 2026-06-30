@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { completeFollowUp, createFollowUp, createStudent, createStudentHistory, deleteStudent, deleteStudentHistory, fetchBatches, fetchBranches, fetchCourses, fetchFeePlans, fetchStudent360, fetchStudentFeePlans, fetchStudentHistory, fetchStudents, updateStudent } from '../api';
 import { useAuth } from '../AuthContext';
 import { PageShell } from '@/components/page-shell';
@@ -486,7 +487,7 @@ export default function Students() {
           <CardContent>
           <div className="space-y-3">
             {filteredStudents.map((student) => (
-              <button key={student.id} onClick={() => selectStudent(student)} className={`w-full rounded-md border p-4 text-left transition ${String(selectedId) === String(student.id) ? 'border-primary bg-primary text-primary-foreground' : 'hover:bg-muted'}`}>
+              <div key={student.id} role="button" tabIndex={0} onClick={() => selectStudent(student)} onKeyDown={(event) => { if (event.key === 'Enter') selectStudent(student); }} className={`w-full rounded-md border p-4 text-left transition ${String(selectedId) === String(student.id) ? 'border-primary bg-primary text-primary-foreground' : 'hover:bg-muted'}`}>
                 <div className="flex items-start justify-between gap-2">
                   <p className="font-semibold">{student.name}</p>
                   <Badge variant={String(selectedId) === String(student.id) ? 'secondary' : 'outline'}>{student.data?.status || 'Active'}</Badge>
@@ -494,7 +495,14 @@ export default function Students() {
                 <p className={String(selectedId) === String(student.id) ? 'text-sm text-primary-foreground/75' : 'text-sm text-muted-foreground'}>
                   {student.grade || 'Class'} - {student.batch || 'Batch'} - {student.data?.status || 'Active'}
                 </p>
-              </button>
+                <Link
+                  to={`/students/${student.id}`}
+                  onClick={(event) => event.stopPropagation()}
+                  className={`mt-3 inline-block text-xs font-semibold underline ${String(selectedId) === String(student.id) ? 'text-primary-foreground' : 'text-primary'}`}
+                >
+                  View 360 profile
+                </Link>
+              </div>
             ))}
             {!filteredStudents.length ? <p className="text-sm text-muted-foreground">No students yet.</p> : null}
           </div>
