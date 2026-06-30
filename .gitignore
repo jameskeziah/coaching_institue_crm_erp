@@ -5,3 +5,5 @@ dist
 server/data.sqlite
 
 storage/
+
+storage/
