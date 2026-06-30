@@ -7,3 +7,8 @@ server/data.sqlite
 storage/
 
 storage/
+.env.local
+.env.*.local
+node_modules/
+dist/
+build/
