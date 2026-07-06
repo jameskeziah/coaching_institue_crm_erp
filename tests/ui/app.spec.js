@@ -59,10 +59,10 @@ test('teacher role only sees teacher-allowed modules in the sidebar', async ({ p
   await loginThroughUi(page, teacher.username, teacher.password);
 
   await expect(page.getByRole('link', { name: 'Dashboard' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Attendance' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Attendance', exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Academic' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Tests' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Teacher Performance' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'TeacherScore' })).toBeVisible();
 
   await expect(page.getByRole('link', { name: 'Fees' })).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'Expenses' })).toHaveCount(0);
