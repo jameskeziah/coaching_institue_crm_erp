@@ -639,6 +639,14 @@ async function createTables() {
       token_hash TEXT NOT NULL,
       expires_at TEXT NOT NULL,
       used_at TEXT,
+      revoked_at TEXT,
+      revoke_reason TEXT,
+      delivery_status TEXT DEFAULT 'pending',
+      delivery_attempt_count INTEGER DEFAULT 0,
+      delivery_last_attempt_at TEXT,
+      delivery_sent_at TEXT,
+      delivery_provider_message_id TEXT,
+      delivery_last_error_code TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )`
   );
@@ -651,6 +659,14 @@ async function createTables() {
       token_hash TEXT NOT NULL,
       expires_at TEXT NOT NULL,
       used_at TEXT,
+      revoked_at TEXT,
+      revoke_reason TEXT,
+      delivery_status TEXT DEFAULT 'pending',
+      delivery_attempt_count INTEGER DEFAULT 0,
+      delivery_last_attempt_at TEXT,
+      delivery_sent_at TEXT,
+      delivery_provider_message_id TEXT,
+      delivery_last_error_code TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )`
   );
@@ -665,9 +681,39 @@ async function createTables() {
       invited_by ${integerType} NOT NULL,
       accepted_at TEXT,
       revoked_at TEXT,
+      delivery_status TEXT DEFAULT 'pending',
+      delivery_attempt_count INTEGER DEFAULT 0,
+      delivery_last_attempt_at TEXT,
+      delivery_sent_at TEXT,
+      delivery_provider_message_id TEXT,
+      delivery_last_error_code TEXT,
       expires_at TEXT NOT NULL,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS email_outbox (
+      id TEXT PRIMARY KEY,
+      tenant_id ${integerType},
+      user_id ${integerType},
+      token_id TEXT,
+      invite_id TEXT,
+      type TEXT NOT NULL,
+      recipient TEXT NOT NULL,
+      payload TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TEXT,
+      last_attempt_at TEXT,
+      locked_at TEXT,
+      locked_by TEXT,
+      sent_at TEXT,
+      provider_message_id TEXT,
+      last_error_code TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`
   );
 
@@ -2655,6 +2701,7 @@ async function migrateStudentProfiles() {
 
 async function migrateAttendanceOperations() {
   const sessionColumns = [
+    ['tenant_id', 'INTEGER'],
     ['branch_id', 'TEXT'],
     ['batch_id', 'TEXT'],
     ['subject_id', 'TEXT'],
@@ -2674,6 +2721,7 @@ async function migrateAttendanceOperations() {
   for (const [column, definition] of sessionColumns) await addColumnIfMissing('attendance_sessions', column, definition);
 
   const recordColumns = [
+    ['tenant_id', 'INTEGER'],
     ['branch_id', 'TEXT'],
     ['batch_id', 'TEXT'],
     ['marked_at', 'TEXT'],
@@ -3365,6 +3413,20 @@ async function migrateAuthColumns() {
   await addColumnIfMissing('users', 'updated_at', 'TEXT');
   await addColumnIfMissing('users', 'deleted_at', 'TEXT');
 
+  for (const table of ['email_verification_tokens', 'password_reset_tokens', 'user_invites']) {
+    await addColumnIfMissing(table, 'delivery_status', "TEXT DEFAULT 'pending'");
+    await addColumnIfMissing(table, 'delivery_attempt_count', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing(table, 'delivery_last_attempt_at', 'TEXT');
+    await addColumnIfMissing(table, 'delivery_sent_at', 'TEXT');
+    await addColumnIfMissing(table, 'delivery_provider_message_id', 'TEXT');
+    await addColumnIfMissing(table, 'delivery_last_error_code', 'TEXT');
+  }
+
+  for (const table of ['email_verification_tokens', 'password_reset_tokens']) {
+    await addColumnIfMissing(table, 'revoked_at', 'TEXT');
+    await addColumnIfMissing(table, 'revoke_reason', 'TEXT');
+  }
+
   await run(`UPDATE users SET email = COALESCE(email, username) WHERE email IS NULL`);
   await run(`UPDATE users SET name = COALESCE(name, username) WHERE name IS NULL`);
   await run(`UPDATE users SET password_hash = COALESCE(password_hash, password) WHERE password_hash IS NULL`);
@@ -3610,6 +3672,7 @@ async function migrateTenantOnboarding() {
   await addColumnIfMissing('fee_plans', 'updated_at', 'TEXT');
   await addColumnIfMissing('fee_plans', 'deleted_at', 'TEXT');
 
+  await addColumnIfMissing('message_templates', 'tenant_id', 'INTEGER');
   await addColumnIfMissing('message_templates', 'name', 'TEXT');
   await addColumnIfMissing('message_templates', 'category', 'TEXT');
   await addColumnIfMissing('message_templates', 'is_default', 'INTEGER DEFAULT 0');
@@ -3747,6 +3810,27 @@ async function migrateSuperAdmin() {
     )`
   );
 
+  const defaultTenant = await get(`SELECT * FROM tenants WHERE slug = ?`, ['miraku']);
+  if (defaultTenant?.id) {
+    const existingDefaultSubscription = await get(
+      `SELECT id
+       FROM tenant_subscriptions
+       WHERE tenant_id = ?
+       AND deleted_at IS NULL`,
+      [defaultTenant.id]
+    );
+
+    if (!existingDefaultSubscription) {
+      const now = new Date().toISOString();
+      await run(
+        `INSERT INTO tenant_subscriptions
+          (id, tenant_id, plan, status, monthly_amount, currency, trial_started_at, trial_ends_at, current_period_start, current_period_end, created_at, updated_at, deleted_at)
+         VALUES (?, ?, 'local', 'active', 0, 'INR', ?, NULL, ?, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)`,
+        [`sub_${Date.now()}_${Math.random().toString(16).slice(2)}`, defaultTenant.id, now, now]
+      );
+    }
+  }
+
   await run(
     `CREATE TABLE IF NOT EXISTS tenant_usage_records (
       id TEXT PRIMARY KEY,
@@ -3792,6 +3876,7 @@ async function migrateSuperAdmin() {
   await run(`CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants (status, deleted_at)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_tenant_subscriptions_status ON tenant_subscriptions (status, deleted_at)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_tenant_subscriptions_tenant ON tenant_subscriptions (tenant_id, deleted_at)`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_subscriptions_one_current ON tenant_subscriptions (tenant_id) WHERE deleted_at IS NULL`);
   await run(`CREATE INDEX IF NOT EXISTS idx_tenant_payments_tenant ON tenant_payments (tenant_id, deleted_at)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_tenant_usage_records_tenant_period ON tenant_usage_records (tenant_id, period_start, period_end)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_support_access_sessions_tenant ON support_access_sessions (tenant_id, revoked_at, expires_at)`);
@@ -3812,9 +3897,32 @@ async function ensureDefaultTenant() {
   return tenant;
 }
 
+async function ensureDefaultTenantSubscription(tenant) {
+  if (!tenant?.id) return;
+
+  const existingDefaultSubscription = await get(
+    `SELECT id
+     FROM tenant_subscriptions
+     WHERE tenant_id = ?
+     AND deleted_at IS NULL`,
+    [tenant.id]
+  );
+
+  if (existingDefaultSubscription) return;
+
+  const now = new Date().toISOString();
+  await run(
+    `INSERT INTO tenant_subscriptions
+      (id, tenant_id, plan, status, monthly_amount, currency, trial_started_at, trial_ends_at, current_period_start, current_period_end, created_at, updated_at, deleted_at)
+     VALUES (?, ?, 'local', 'active', 0, 'INR', ?, NULL, ?, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)`,
+    [`sub_${Date.now()}_${Math.random().toString(16).slice(2)}`, tenant.id, now, now]
+  );
+}
+
 async function migrateTenantColumns() {
   await addColumnIfMissing('users', 'tenant_id', 'INTEGER');
   const tenant = await ensureDefaultTenant();
+  await ensureDefaultTenantSubscription(tenant);
   if (tenant?.id) {
     await run(`UPDATE users SET tenant_id = ? WHERE tenant_id IS NULL`, [tenant.id]);
   }
@@ -3963,6 +4071,9 @@ async function migrateTenantIndexes() {
   await run(`CREATE INDEX IF NOT EXISTS idx_email_verification_tokens_hash ON email_verification_tokens (token_hash)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_user_invites_token ON user_invites (token_hash)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_user_invites_tenant_email ON user_invites (tenant_id, email)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_email_outbox_status_retry ON email_outbox (status, next_attempt_at, locked_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_email_outbox_token ON email_outbox (token_id)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_email_outbox_invite ON email_outbox (invite_id)`);
 }
 
 async function seedAdmin() {

@@ -1,5 +1,6 @@
 const express = require('express');
 const { createTenantOnboarding } = require('../services/tenant-onboarding.service');
+const { isMailDeliveryError } = require('../services/mail.service');
 const auth = require('../middleware/auth');
 const { requireTenant } = require('../middleware/tenant');
 const { requireAnyRole } = require('../middleware/rbac');
@@ -13,10 +14,20 @@ router.post('/institute', async (req, res) => {
     const result = await createTenantOnboarding(req.body);
 
     return res.status(201).json({
-      message: 'Institute onboarded successfully',
+      message: result.deliveryStatus === 'sent'
+        ? 'Institute created. Verification email sent.'
+        : 'Institute created. Verification email queued.',
       data: result,
     });
   } catch (error) {
+    if (isMailDeliveryError(error)) {
+      return res.status(503).json({
+        message:
+          'The institute was created in pending verification, but the verification email could not be delivered. Please try again or request a resend.',
+        code: error.code,
+      });
+    }
+
     return res.status(400).json({
       message: error.message || 'Failed to onboard institute',
     });

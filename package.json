@@ -17,6 +17,9 @@
     "migrate:admission-growth": "node server/migrations/014-admission-assignment-duplicates-campaigns.js",
     "migrate:fee-structures": "node server/migrations/015-fee-structure-templates.js",
     "seed:super-admin": "node server/scripts/create-super-admin.js",
+    "audit:onboarding-lifecycle": "node scripts/audit-onboarding-lifecycle.mjs",
+    "email:outbox:process": "node scripts/process-email-outbox.mjs",
+    "test:mail": "node --test server/tests/mail.service.integration.test.js server/tests/email-outbox.lifecycle.test.js",
     "test:smoke": "node scripts/smoke-test.mjs",
     "test:ui": "playwright test"
   },
@@ -35,6 +38,7 @@
     "framer-motion": "^11.0.0",
     "lucide-react": "^1.17.0",
     "next-themes": "^0.4.6",
+    "nodemailer": "^9.0.3",
     "pdfkit": "^0.19.1",
     "razorpay": "^2.9.6",
     "react": "^18.3.1",

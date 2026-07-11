@@ -57,10 +57,32 @@ const envSchema = z.object({
     .regex(/^\d+$/, 'INVITE_TOKEN_DAYS must be a number')
     .transform(Number)
     .default('7'),
+  TRIAL_DAYS: z
+    .string()
+    .regex(/^\d+$/, 'TRIAL_DAYS must be a number')
+    .transform(Number)
+    .default('14'),
+  EMAIL_OUTBOX_WORKER_ENABLED: optionalBooleanStringSchema,
+  EMAIL_OUTBOX_WORKER_INTERVAL_MS: z
+    .string()
+    .regex(/^\d+$/, 'EMAIL_OUTBOX_WORKER_INTERVAL_MS must be a number')
+    .transform(Number)
+    .default('60000'),
+  EMAIL_OUTBOX_WORKER_LIMIT: z
+    .string()
+    .regex(/^\d+$/, 'EMAIL_OUTBOX_WORKER_LIMIT must be a number')
+    .transform(Number)
+    .default('20'),
+  EMAIL_OUTBOX_STALE_LOCK_MS: z
+    .string()
+    .regex(/^\d+$/, 'EMAIL_OUTBOX_STALE_LOCK_MS must be a number')
+    .transform(Number)
+    .default('600000'),
   TENANT_BOOTSTRAP_SECRET: z.string().optional(),
   MAIL_FROM: z.string().email().optional(),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.string().optional(),
+  SMTP_SECURE: optionalBooleanStringSchema,
   SMTP_USER: z.string().optional(),
   SMTP_PASS: z.string().optional(),
   ALLOW_REGISTRATION: optionalBooleanStringSchema,
@@ -104,6 +126,7 @@ const productionRequiredVariables = [
   'MAIL_FROM',
   'SMTP_HOST',
   'SMTP_PORT',
+  'SMTP_SECURE',
   'SMTP_USER',
   'SMTP_PASS',
 ];

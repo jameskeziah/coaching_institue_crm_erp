@@ -2,6 +2,7 @@ const { env } = require('./config/env');
 const express = require('express');
 const cors = require('cors');
 const { migrate } = require('./db');
+const { processDueEmailOutboxRecords } = require('./services/email-outbox.service');
 
 const authRoutes = require('./routes/auth.routes');
 const usersRoutes = require('./routes/users.routes');
@@ -30,6 +31,31 @@ const razorpayWebhookRoutes = require('./routes/razorpayWebhook.routes');
 const legacyRoutes = require('./routes/legacy.routes');
 
 const app = express();
+let emailOutboxWorkerInterval = null;
+
+function startEmailOutboxWorker() {
+  if (!env.EMAIL_OUTBOX_WORKER_ENABLED) return;
+
+  const workerId = `api-${process.pid}`;
+  const runWorker = async () => {
+    try {
+      await processDueEmailOutboxRecords({
+        limit: env.EMAIL_OUTBOX_WORKER_LIMIT,
+        workerId,
+        staleAfterMs: env.EMAIL_OUTBOX_STALE_LOCK_MS,
+      });
+    } catch (error) {
+      console.warn('Email outbox worker failed', {
+        message: error.message,
+        code: error.code,
+      });
+    }
+  };
+
+  emailOutboxWorkerInterval = setInterval(runWorker, env.EMAIL_OUTBOX_WORKER_INTERVAL_MS);
+  if (typeof emailOutboxWorkerInterval.unref === 'function') emailOutboxWorkerInterval.unref();
+  setTimeout(runWorker, 0).unref?.();
+}
 
 app.use(cors());
 app.use('/api/webhooks/razorpay', razorpayWebhookRoutes);
@@ -74,5 +100,6 @@ app.use(legacyRoutes);
   await migrate();
   app.listen(env.PORT, () => {
     console.log(`Server listening on http://localhost:${env.PORT}`);
+    startEmailOutboxWorker();
   });
 })();
