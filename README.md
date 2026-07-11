@@ -10,21 +10,15 @@ ProTrack Institute OS is a Vite + React frontend with an Express API and a raw-S
    npm install
    ```
 
-2. Install backend dependencies:
+2. Copy `.env.example` to `.env` and replace the placeholder secrets.
 
-   ```bash
-   npm --prefix server install
-   ```
-
-3. Copy `.env.example` to `.env` and replace the placeholder secrets.
-
-4. Start the API on port `4000`:
+3. Start the API on port `4000`:
 
    ```bash
    npm run start:server
    ```
 
-5. Start the Vite frontend on port `5173` in another terminal:
+4. Start the Vite frontend on port `5173` in another terminal:
 
    ```bash
    npm run dev
@@ -49,6 +43,12 @@ CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 TRUST_PROXY=false
 JSON_BODY_LIMIT=1mb
 URLENCODED_BODY_LIMIT=100kb
+RATE_LIMIT_WINDOW_MINUTES=15
+LOGIN_RATE_LIMIT_MAX=30
+PLATFORM_LOGIN_RATE_LIMIT_MAX=10
+PASSWORD_RESET_RATE_LIMIT_MAX=5
+ONBOARDING_RATE_LIMIT_MAX=3
+PUBLIC_ENQUIRY_RATE_LIMIT_MAX=20
 DATABASE_URL=./server/data.sqlite
 DATABASE_SSL=false
 JWT_SECRET=replace-with-at-least-32-random-characters
@@ -70,7 +70,7 @@ Production startup also requires the email, WhatsApp, Razorpay, and tenant-boots
 ## Security behavior
 
 - New institute owners must verify their email before the tenant changes from `pending_verification` to an active trial.
-- Login, platform login, password-reset, onboarding, and public-enquiry endpoints are rate limited.
+- Login, platform login, password-reset, onboarding, and public-enquiry endpoints are rate limited with environment-configured ceilings.
 - CORS is allowlist-based.
 - Helmet security headers are enabled and Express request bodies are size limited.
 - Only an existing owner can create or promote another owner.

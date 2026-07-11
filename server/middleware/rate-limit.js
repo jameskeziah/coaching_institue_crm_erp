@@ -1,4 +1,5 @@
 const DEFAULT_MAX_KEYS = 10000;
+const { env } = require('../config/env');
 
 function clientKey(req) {
   return req.ip || req.socket?.remoteAddress || 'unknown';
@@ -45,36 +46,36 @@ function createRateLimiter({ windowMs, max, message, maxKeys = DEFAULT_MAX_KEYS 
   };
 }
 
-const fifteenMinutes = 15 * 60 * 1000;
+const configuredWindow = env.RATE_LIMIT_WINDOW_MINUTES * 60 * 1000;
 const oneHour = 60 * 60 * 1000;
 
 const loginRateLimit = createRateLimiter({
-  windowMs: fifteenMinutes,
-  max: 10,
+  windowMs: configuredWindow,
+  max: env.LOGIN_RATE_LIMIT_MAX,
   message: 'Too many login attempts. Please try again later.',
 });
 
 const platformLoginRateLimit = createRateLimiter({
-  windowMs: fifteenMinutes,
-  max: 5,
+  windowMs: configuredWindow,
+  max: env.PLATFORM_LOGIN_RATE_LIMIT_MAX,
   message: 'Too many platform login attempts. Please try again later.',
 });
 
 const passwordResetRateLimit = createRateLimiter({
   windowMs: oneHour,
-  max: 5,
+  max: env.PASSWORD_RESET_RATE_LIMIT_MAX,
   message: 'Too many password reset attempts. Please try again later.',
 });
 
 const onboardingRateLimit = createRateLimiter({
   windowMs: oneHour,
-  max: 3,
+  max: env.ONBOARDING_RATE_LIMIT_MAX,
   message: 'Too many onboarding attempts. Please try again later.',
 });
 
 const publicEnquiryRateLimit = createRateLimiter({
-  windowMs: fifteenMinutes,
-  max: 10,
+  windowMs: configuredWindow,
+  max: env.PUBLIC_ENQUIRY_RATE_LIMIT_MAX,
   message: 'Too many enquiries from this connection. Please try again later.',
 });
 
