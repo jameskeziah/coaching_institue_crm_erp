@@ -65,6 +65,9 @@ router.post('/', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAG
     return res.status(400).json({ error: error.message });
   }
   if (!userRoles.includes(role)) return res.status(400).json({ error: 'Invalid role' });
+  if (role === ROLES.OWNER && req.user.role !== ROLES.OWNER) {
+    return res.status(403).json({ error: 'Only an owner can create another owner' });
+  }
 
   const existing = await get(`SELECT * FROM users WHERE (username = ? OR email = ?) AND deleted_at IS NULL`, [username, email]);
   if (existing) return res.status(400).json({ error: 'User already exists' });
@@ -103,9 +106,7 @@ async function updateUserRole(req, res) {
     ROLES.USER,
   ];
 
-  if (req.user.role === ROLES.OWNER) {
-    allowedRoles.unshift(ROLES.OWNER);
-  }
+  if (req.user.role === ROLES.OWNER) allowedRoles.unshift(ROLES.OWNER);
 
   if (!allowedRoles.includes(role)) return res.status(400).json({ error: 'Invalid role' });
   if (String(id) === String(req.user.id)) return res.status(400).json({ error: 'You cannot change your own role' });
@@ -117,12 +118,9 @@ async function updateUserRole(req, res) {
     const ownerCount = await get(
       `SELECT COUNT(*) AS count
        FROM users
-       WHERE tenant_id = ?
-       AND role = ?
-       AND deleted_at IS NULL`,
+       WHERE tenant_id = ? AND role = ? AND deleted_at IS NULL`,
       [tenantId, ROLES.OWNER]
     );
-
     if (Number(ownerCount?.count || 0) <= 1) {
       return res.status(400).json({ error: 'Cannot remove the last owner' });
     }
@@ -130,11 +128,8 @@ async function updateUserRole(req, res) {
 
   await run(
     `UPDATE users
-     SET role = ?,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = ?
-     AND tenant_id = ?
-     AND deleted_at IS NULL`,
+     SET role = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
     [role, id, tenantId]
   );
   const user = await get(
