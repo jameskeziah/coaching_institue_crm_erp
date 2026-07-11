@@ -15,13 +15,13 @@ export default defineConfig({
       command: 'npm run start:server',
       url: 'http://127.0.0.1:4000/api',
       reuseExistingServer: true,
-      timeout: 20_000,
+      timeout: 60_000,
     },
     {
-      command: 'npm run dev -- --host 127.0.0.1 --port 5173',
+      command: 'npm exec -- vite --host 127.0.0.1 --port 5173',
       url: 'http://127.0.0.1:5173',
       reuseExistingServer: true,
-      timeout: 20_000,
+      timeout: 60_000,
     },
   ],
   projects: [

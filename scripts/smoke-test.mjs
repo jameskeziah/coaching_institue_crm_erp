@@ -1,6 +1,63 @@
+import { spawn, spawnSync } from 'node:child_process';
+
 const API_BASE = process.env.API_BASE || 'http://localhost:4000/api';
 const username = process.env.SMOKE_USERNAME || process.env.ADMIN_USERNAME || 'admin';
 const password = process.env.SMOKE_PASSWORD || process.env.ADMIN_PASSWORD || 'MirakuAdmin2026!';
+
+let managedServer = null;
+
+function healthUrl() {
+  const url = new URL(API_BASE);
+  const path = url.pathname.replace(/\/$/, '');
+  url.pathname = `${path}/health`;
+  return url.toString();
+}
+
+function canManageApiServer() {
+  const url = new URL(API_BASE);
+  return ['localhost', '127.0.0.1', '::1'].includes(url.hostname);
+}
+
+async function isApiHealthy() {
+  try {
+    const response = await fetch(healthUrl());
+    const body = await response.json().catch(() => ({}));
+    return response.ok && body.status === 'ok';
+  } catch {
+    return false;
+  }
+}
+
+async function ensureApiAvailable() {
+  if (await isApiHealthy()) return;
+  if (!canManageApiServer()) return;
+
+  const command = process.platform === 'win32' ? 'npm.cmd run start:server' : 'npm';
+  const args = process.platform === 'win32' ? [] : ['run', 'start:server'];
+  managedServer = spawn(command, args, {
+    cwd: process.cwd(),
+    stdio: 'ignore',
+    shell: process.platform === 'win32',
+    windowsHide: true,
+  });
+
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    if (await isApiHealthy()) return;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  throw new Error(`API did not become healthy at ${healthUrl()}`);
+}
+
+function stopManagedServer() {
+  if (!managedServer?.pid) return;
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/pid', String(managedServer.pid), '/t', '/f'], { stdio: 'ignore' });
+  } else {
+    managedServer.kill('SIGTERM');
+  }
+}
 
 async function request(path, options = {}) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
@@ -1583,7 +1640,12 @@ async function main() {
   console.log('Smoke tests passed');
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
-});
+ensureApiAvailable()
+  .then(() => main())
+  .catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    stopManagedServer();
+  });

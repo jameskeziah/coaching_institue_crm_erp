@@ -12,3 +12,6 @@ storage/
 node_modules/
 dist/
 build/
+test-results/
+playwright-report/
+blob-report/
