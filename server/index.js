@@ -1,8 +1,20 @@
 const { env } = require('./config/env');
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const { migrate } = require('./db');
+const authMiddleware = require('./middleware/auth');
+const { requireTenant } = require('./middleware/tenant');
+const { studentDataAccess } = require('./middleware/student-data-access');
+const {
+  loginRateLimit,
+  platformLoginRateLimit,
+  passwordResetRateLimit,
+  onboardingRateLimit,
+  publicEnquiryRateLimit,
+} = require('./middleware/rate-limit');
 
+const emailVerificationRoutes = require('./routes/email-verification.routes');
 const authRoutes = require('./routes/auth.routes');
 const usersRoutes = require('./routes/users.routes');
 const invitesRoutes = require('./routes/invites.routes');
@@ -30,11 +42,35 @@ const razorpayWebhookRoutes = require('./routes/razorpayWebhook.routes');
 const legacyRoutes = require('./routes/legacy.routes');
 
 const app = express();
+const allowedOrigins = new Set(env.CORS_ORIGINS);
 
-app.use(cors());
+if (env.TRUST_PROXY) app.set('trust proxy', 1);
+app.disable('x-powered-by');
+app.use(helmet());
+app.use(cors({
+  credentials: true,
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Authorization', 'Content-Type', 'X-Requested-With'],
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+    const error = new Error('Origin is not allowed by CORS policy');
+    error.code = 'CORS_ORIGIN_DENIED';
+    return callback(error);
+  },
+}));
+
 app.use('/api/webhooks/razorpay', razorpayWebhookRoutes);
 app.use('/api/webhooks/whatsapp', whatsappWebhookRoutes);
-app.use(express.json());
+app.use(express.json({ limit: env.JSON_BODY_LIMIT }));
+app.use(express.urlencoded({ extended: false, limit: env.URLENCODED_BODY_LIMIT }));
+
+app.post('/api/auth/login', loginRateLimit);
+app.post('/api/platform-auth/login', platformLoginRateLimit);
+app.post('/api/auth/forgot-password', passwordResetRateLimit);
+app.post('/api/auth/reset-password', passwordResetRateLimit);
+app.post('/api/auth/resend-trial-verification', passwordResetRateLimit);
+app.post('/api/onboarding/institute', onboardingRateLimit);
+app.post('/api/public/enquiries', publicEnquiryRateLimit);
 
 app.get('/api/health', (req, res) => {
   res.json({
@@ -44,6 +80,7 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+app.use('/api/auth', emailVerificationRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/invites', invitesRoutes);
@@ -55,7 +92,7 @@ app.use('/api', leadActivitiesRoutes);
 app.use('/api', leadManagementRoutes);
 app.use('/api', sourceAnalyticsRoutes);
 app.use('/api', publicEnquiryRoutes);
-app.use('/api/students', studentsRoutes);
+app.use('/api/students', authMiddleware, requireTenant, studentDataAccess, studentsRoutes);
 app.use('/api', feeStructuresRoutes);
 app.use('/api', academicMasterRoutes);
 app.use('/api', attendanceOperationsRoutes);
@@ -66,9 +103,25 @@ app.use('/api', tenantFeeSettingsRoutes);
 app.use('/api', feesRoutes);
 app.use('/api', paymentLinksRoutes);
 app.use('/api', discountRequestsRoutes);
-
-// Remaining routes are migrated module by module while preserving frontend URLs.
 app.use(legacyRoutes);
+
+app.use((error, req, res, next) => {
+  if (error?.code === 'CORS_ORIGIN_DENIED') {
+    return res.status(403).json({
+      message: 'Origin is not allowed',
+      code: 'CORS_ORIGIN_DENIED',
+    });
+  }
+
+  if (error?.type === 'entity.too.large') {
+    return res.status(413).json({
+      message: 'Request body is too large',
+      code: 'REQUEST_BODY_TOO_LARGE',
+    });
+  }
+
+  return next(error);
+});
 
 (async () => {
   await migrate();
