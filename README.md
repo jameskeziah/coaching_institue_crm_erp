@@ -1,10 +1,10 @@
 # ProTrack Institute OS
 
-Vite + React + Tailwind frontend with an Express + SQLite API for institute CRM/ERP workflows, admissions, counselling, teacher performance, reports, and operations.
+ProTrack Institute OS is a Vite + React frontend with an Express API and a raw-SQL SQLite/PostgreSQL data layer for admissions, student operations, fees, attendance, communication, and teacher-performance workflows.
 
-## Setup
+## Local setup
 
-1. Install frontend dependencies:
+1. Install frontend dependencies from the repository root:
 
    ```bash
    npm install
@@ -13,91 +13,105 @@ Vite + React + Tailwind frontend with an Express + SQLite API for institute CRM/
 2. Install backend dependencies:
 
    ```bash
-   cd server
-   npm install
-   cd ..
+   npm --prefix server install
    ```
 
-3. Create `.env` from `.env.example` and set at least:
+3. Copy `.env.example` to `.env` and replace the placeholder secrets.
 
-   ```text
-   JWT_SECRET=replace-with-a-long-random-secret
-   ALLOW_REGISTRATION=false
-   ADMIN_USERNAME=admin
-   ADMIN_PASSWORD=replace-with-a-strong-initial-admin-password
-   PORT=4000
-   DATABASE_URL=
-   DATABASE_SSL=false
-   ```
+4. Start the API on port `4000`:
 
-   `JWT_SECRET` is required. `ADMIN_USERNAME` and `ADMIN_PASSWORD` are only used to seed a first admin if that user does not already exist.
-
-   Leave `DATABASE_URL` empty for local SQLite. Set it to a Postgres connection string for multi-user deployments.
-
-4. In PowerShell, load the environment before starting the backend:
-
-   ```powershell
-   $env:JWT_SECRET="replace-with-a-long-random-secret"
-   $env:ALLOW_REGISTRATION="false"
-   $env:ADMIN_USERNAME="admin"
-   $env:ADMIN_PASSWORD="replace-with-a-strong-initial-admin-password"
+   ```bash
    npm run start:server
    ```
 
-5. Start the frontend in another terminal:
+5. Start the Vite frontend on port `5173` in another terminal:
 
    ```bash
    npm run dev
    ```
 
+The default local URLs are:
+
+- Frontend: `http://localhost:5173`
+- API: `http://localhost:4000/api`
+- Health check: `http://localhost:4000/api/health`
+
+## Required environment variables
+
+The server validates environment variables during startup. The local minimum is:
+
+```text
+NODE_ENV=development
+PORT=4000
+APP_URL=http://localhost:5173
+API_URL=http://localhost:4000/api
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+TRUST_PROXY=false
+JSON_BODY_LIMIT=1mb
+URLENCODED_BODY_LIMIT=100kb
+DATABASE_URL=./server/data.sqlite
+DATABASE_SSL=false
+JWT_SECRET=replace-with-at-least-32-random-characters
+JWT_ACCESS_EXPIRES_IN=15m
+REFRESH_TOKEN_DAYS=30
+RESET_PASSWORD_TOKEN_MINUTES=30
+EMAIL_VERIFICATION_TOKEN_HOURS=24
+INVITE_TOKEN_DAYS=7
+TRIAL_DAYS=14
+ALLOW_REGISTRATION=false
+```
+
+Use `MAIL_FROM`, not `SMTP_FROM`. Use `JWT_ACCESS_EXPIRES_IN`, not `JWT_EXPIRES_IN`. `CORS_ORIGINS` is a comma-separated allowlist and must contain every trusted browser origin. Set `TRUST_PROXY=true` only when the API is behind a trusted reverse proxy so rate limiting receives the real client IP.
+
+For PostgreSQL, replace `DATABASE_URL` with a PostgreSQL connection string. Set `DATABASE_SSL=true` only when the provider requires TLS with the current compatibility mode.
+
+Production startup also requires the email, WhatsApp, Razorpay, and tenant-bootstrap variables listed in `.env.example`.
+
+## Security behavior
+
+- New institute owners must verify their email before the tenant changes from `pending_verification` to an active trial.
+- Login, platform login, password-reset, onboarding, and public-enquiry endpoints are rate limited.
+- CORS is allowlist-based.
+- Helmet security headers are enabled and Express request bodies are size limited.
+- Only an existing owner can create or promote another owner.
+- Teachers and counsellors receive a reduced student payload and cannot access student fees, guardian identity records, documents, or private communications.
+- Public duplicate-enquiry responses disclose only that a duplicate exists, not the matching lead records.
+
 ## Commands
 
-* `npm run dev` - start the Vite frontend
-* `npm run build` - build production frontend assets
-* `npm run preview` - preview production frontend build
-* `npm run start:server` - start the Express API
-* `npm run test:smoke` - run API smoke tests against a running backend
+- `npm run dev` — start the Vite frontend
+- `npm run build` — build the frontend
+- `npm run preview` — preview the production frontend build
+- `npm run start:server` — start the Express API
+- `npm run start:server:production` — start the API with `NODE_ENV=production`
+- `npm run test:smoke` — run API smoke tests against a running backend
+- `npm run test:ui` — run Playwright UI tests
 
-## Smoke Tests
+## Tests
 
-Run the backend first, then run:
+For smoke tests, start the API first and provide valid administrator credentials:
 
 ```powershell
-$env:JWT_SECRET="replace-with-a-long-random-secret"
 $env:SMOKE_USERNAME="admin"
 $env:SMOKE_PASSWORD="your-admin-password"
 npm run test:smoke
 ```
 
-The smoke test covers login, teacher CRUD, teacher review save/load, dashboard source endpoints, and admin-only user access.
+Playwright starts the API at `http://127.0.0.1:4000` and the frontend at `http://127.0.0.1:5173` unless the corresponding test environment variables override them.
 
-## Data
+## Data-store policy
 
-The backend supports two database modes:
+- SQLite is for local development and single-process testing only. The default file is `server/data.sqlite`.
+- PostgreSQL is required before storing real shared multi-tenant data.
+- The transaction service uses request-scoped PostgreSQL clients. SQLite operations are serialized to avoid interleaving statements inside a transaction.
 
-* **SQLite fallback:** default local mode when `DATABASE_URL` is empty. The database file is `server/data.sqlite` and is ignored by Git.
-* **Postgres:** production/staging mode when `DATABASE_URL` is set, for example:
+## Stack decision
 
-  ```text
-  DATABASE_URL=postgresql://username:password@localhost:5432/teacher_scorecard
-  DATABASE_SSL=false
-  ```
+This repository remains on its existing stack:
 
-  Use `DATABASE_SSL=true` for hosted Postgres providers that require SSL.
+- Frontend: Vite + React
+- Backend: Express
+- Database: SQLite/PostgreSQL with raw SQL
+- Authentication: JWT username/password
 
-SQLite is fine for local/single-user use. Use Postgres before deploying this as a shared multi-user system.
-
-## Stack Decision
-
-This product version will continue with the existing stack:
-
-- **Frontend:** Vite + React
-- **Backend:** Express
-- **Database:** SQLite/Postgres with raw SQL
-- **Auth:** JWT username/password
-
-We will not migrate this repo to Next.js, NestJS, Prisma, or Clerk at this stage.
-
-Reason: the current priority is to stabilize the existing product, complete core institute-management features, and keep local development reliable. A stack migration now would slow development, increase bugs, and create unnecessary instability.
-
-Future migrations can be reconsidered only after the current product version is stable, tested, and usable.
+Do not migrate this repository to Next.js, NestJS, Prisma, or Clerk as part of stabilization work.
