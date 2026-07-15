@@ -1,8 +1,12 @@
 import { expect, test } from '@playwright/test';
 
-const apiBase = process.env.API_BASE || 'http://127.0.0.1:4000/api';
-const adminUsername = process.env.SMOKE_USERNAME || process.env.ADMIN_USERNAME || 'admin';
-const adminPassword = process.env.SMOKE_PASSWORD || process.env.ADMIN_PASSWORD || 'MirakuAdmin2026!';
+const apiBase = (process.env.API_URL || 'http://localhost:4000/api').replace(/\/+$/, '');
+const adminUsername = process.env.ADMIN_USERNAME;
+const adminPassword = process.env.ADMIN_PASSWORD;
+
+if (!adminUsername || !adminPassword) {
+  throw new Error('UI tests require ADMIN_USERNAME and ADMIN_PASSWORD.');
+}
 
 async function loginThroughUi(page, username = adminUsername, password = adminPassword) {
   await page.goto('/dashboard');

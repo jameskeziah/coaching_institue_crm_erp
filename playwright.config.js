@@ -1,4 +1,10 @@
 import { defineConfig, devices } from '@playwright/test';
+import dotenv from 'dotenv';
+
+dotenv.config({ path: '.env', quiet: true });
+
+const appUrl = (process.env.APP_URL || 'http://localhost:5173').replace(/\/+$/, '');
+const apiUrl = (process.env.API_URL || 'http://localhost:4000/api').replace(/\/+$/, '');
 
 export default defineConfig({
   testDir: './tests/ui',
@@ -7,20 +13,20 @@ export default defineConfig({
     timeout: 10_000,
   },
   use: {
-    baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:5173',
+    baseURL: appUrl,
     trace: 'on-first-retry',
   },
   webServer: [
     {
       command: 'npm run start:server',
-      url: 'http://127.0.0.1:4000/api',
-      reuseExistingServer: true,
+      url: apiUrl,
+      reuseExistingServer: false,
       timeout: 60_000,
     },
     {
-      command: 'npm exec -- vite --host 127.0.0.1 --port 5173',
-      url: 'http://127.0.0.1:5173',
-      reuseExistingServer: true,
+      command: 'npm exec -- vite --host localhost --port 5173',
+      url: appUrl,
+      reuseExistingServer: false,
       timeout: 60_000,
     },
   ],

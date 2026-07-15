@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const express = require('express');
-const { run, all, get } = require('../db');
+const { run, all, get, transaction } = require('../services/db.service');
 const authMiddleware = require('../middleware/auth');
 const { requireTenant } = require('../middleware/tenant');
 const { requireAnyRole } = require('../middleware/rbac');
@@ -13,6 +13,25 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const STATUSES = new Set(['ACTIVE', 'INACTIVE', 'PROVISIONAL']);
 const GUARDIAN_RELATIONSHIPS = new Set(['FATHER', 'MOTHER', 'GUARDIAN', 'BROTHER', 'SISTER', 'OTHER']);
+
+class ImportRequestError extends Error {
+  constructor(status, message, code) {
+    super(message);
+    this.name = 'ImportRequestError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function importRequestError(status, message, code) {
+  return new ImportRequestError(status, message, code);
+}
+
+function sendImportRequestError(res, error) {
+  const payload = { error: error.message };
+  if (error.code) payload.code = error.code;
+  return res.status(error.status).json(payload);
+}
 
 function text(value) {
   const normalized = String(value ?? '').trim();
@@ -301,141 +320,245 @@ router.post('/fee-opening-balances/dry-run', authMiddleware, requireTenant, requ
   res.status(201).json({ batchId, entityType: 'FEE_OPENING_BALANCE', status: invalidRows ? 'REJECTED' : 'VALIDATED', totalRows: rows.length, validRows: rows.length - invalidRows, invalidRows, totalAmount, rows: results });
 });
 
-router.post('/:batchId/commit', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
+router.post('/:batchId/commit', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res, next) => {
   const tenantId = currentTenantId(req);
-  const batch = await get(`SELECT id, entity_type, status, payload_sha256 FROM data_import_batches WHERE id = ? AND tenant_id = ?`, [req.params.batchId, tenantId]);
-  if (!batch) return res.status(404).json({ error: 'Import batch not found' });
-  if (batch.status !== 'VALIDATED') return res.status(409).json({ error: `Import batch cannot be committed from ${batch.status}` });
-  const importRows = await all(`SELECT id, row_number, normalized_data FROM data_import_rows WHERE batch_id = ? AND tenant_id = ? AND status = 'VALID' ORDER BY row_number`, [batch.id, tenantId]);
-  const normalizedRows = importRows.map((row) => JSON.parse(row.normalized_data));
-  if (payloadHash(normalizedRows) !== batch.payload_sha256) return res.status(409).json({ error: 'Import batch payload checksum mismatch' });
-  if (batch.entity_type === 'STUDENT') {
-    const duplicates = await findDuplicateCodes(tenantId, normalizedRows);
-    if (duplicates.size) return res.status(409).json({ error: 'Import conflicts changed after validation; run a new dry run', code: 'IMPORT_STALE' });
-  } else if (batch.entity_type === 'GUARDIAN') {
-    for (const row of normalizedRows) {
-      const student = await get(`SELECT id FROM students WHERE tenant_id = ? AND LOWER(student_code) = LOWER(?) AND deleted_at IS NULL`, [tenantId, row.studentCode]);
-      if (!student) return res.status(409).json({ error: 'Import conflicts changed after validation; run a new dry run', code: 'IMPORT_STALE' });
-      const duplicate = await get(
-        `SELECT id FROM student_guardians WHERE tenant_id = ? AND student_id = ? AND LOWER(name) = LOWER(?) AND COALESCE(phone, '') = COALESCE(?, '')`,
-        [tenantId, String(student.id), row.name, row.phone]
-      );
-      const primary = row.isPrimary && await get(`SELECT id FROM student_guardians WHERE tenant_id = ? AND student_id = ? AND is_primary = 1`, [tenantId, String(student.id)]);
-      if (duplicate || primary) return res.status(409).json({ error: 'Import conflicts changed after validation; run a new dry run', code: 'IMPORT_STALE' });
-    }
-  } else if (batch.entity_type === 'FEE_OPENING_BALANCE') {
-    for (const row of normalizedRows) {
-      const student = await get(`SELECT id FROM students WHERE tenant_id = ? AND LOWER(student_code) = LOWER(?) AND deleted_at IS NULL`, [tenantId, row.studentCode]);
-      if (!student) return res.status(409).json({ error: 'Import conflicts changed after validation; run a new dry run', code: 'IMPORT_STALE' });
-      const existing = await get(
-        `SELECT id FROM student_fee_plans WHERE tenant_id = ? AND student_id = ? AND LOWER(course_name) = LOWER(?) AND LOWER(academic_year) = LOWER(?) AND status NOT IN ('REVERSED', 'CANCELLED')`,
-        [tenantId, String(student.id), row.courseName, row.academicYear]
-      );
-      if (existing) return res.status(409).json({ error: 'Import conflicts changed after validation; run a new dry run', code: 'IMPORT_STALE' });
-    }
-  }
 
-  await run(`UPDATE data_import_batches SET status = 'COMMITTING' WHERE id = ? AND tenant_id = ? AND status = 'VALIDATED'`, [batch.id, tenantId]);
-  const inserted = [];
   try {
-    for (let index = 0; index < importRows.length; index += 1) {
-      const rowRecord = importRows[index];
-      const row = normalizedRows[index];
-      let entityId;
+    const result = await transaction(async () => {
+      const batch = await get(
+        `SELECT id, entity_type, status, payload_sha256
+         FROM data_import_batches
+         WHERE id = ? AND tenant_id = ?`,
+        [req.params.batchId, tenantId]
+      );
+      if (!batch) throw importRequestError(404, 'Import batch not found');
+      if (batch.status !== 'VALIDATED') {
+        throw importRequestError(409, `Import batch cannot be committed from ${batch.status}`);
+      }
+
+      const claim = await run(
+        `UPDATE data_import_batches
+         SET status = 'COMMITTING'
+         WHERE id = ? AND tenant_id = ? AND status = 'VALIDATED'`,
+        [batch.id, tenantId]
+      );
+      if (Number(claim.changes) !== 1) {
+        throw importRequestError(409, 'Import batch is already being committed', 'IMPORT_STALE');
+      }
+
+      const importRows = await all(
+        `SELECT id, row_number, normalized_data
+         FROM data_import_rows
+         WHERE batch_id = ? AND tenant_id = ? AND status = 'VALID'
+         ORDER BY row_number`,
+        [batch.id, tenantId]
+      );
+      const normalizedRows = importRows.map((row) => JSON.parse(row.normalized_data));
+      if (payloadHash(normalizedRows) !== batch.payload_sha256) {
+        throw importRequestError(409, 'Import batch payload checksum mismatch');
+      }
+
       if (batch.entity_type === 'STUDENT') {
-        const parts = row.name.split(/\s+/);
-        const result = await run(
-          `INSERT INTO students
-          (tenant_id, student_code, name, student_name, display_name, first_name, last_name, grade, class_level,
-           student_email, student_phone, parent_name, parent_phone, date_of_birth, admission_date, status,
-           data, legacy_data, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        [tenantId, row.studentCode, row.name, row.name, row.name, parts[0], parts.length > 1 ? parts.slice(1).join(' ') : null,
-          row.classLevel, row.classLevel, row.studentEmail, row.studentPhone, row.parentName, row.parentPhone,
-          row.dateOfBirth, row.admissionDate, row.status]
-        );
-        entityId = String(result.lastID);
+        const duplicates = await findDuplicateCodes(tenantId, normalizedRows);
+        if (duplicates.size) {
+          throw importRequestError(409, 'Import conflicts changed after validation; run a new dry run', 'IMPORT_STALE');
+        }
       } else if (batch.entity_type === 'GUARDIAN') {
-        const student = await get(`SELECT id FROM students WHERE tenant_id = ? AND LOWER(student_code) = LOWER(?) AND deleted_at IS NULL`, [tenantId, row.studentCode]);
-        if (!student) throw new Error('Guardian import became stale; run a new dry run');
-        if (row.isPrimary && await get(`SELECT id FROM student_guardians WHERE tenant_id = ? AND student_id = ? AND is_primary = 1`, [tenantId, String(student.id)])) throw new Error('Guardian import became stale; run a new dry run');
-        entityId = crypto.randomUUID();
-        await run(
-          `INSERT INTO student_guardians
-            (id, tenant_id, student_id, name, relationship, phone, alternate_phone, email, occupation, address,
-             is_primary, is_emergency_contact, can_receive_notifications, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-          [entityId, tenantId, String(student.id), row.name, row.relationship, row.phone, row.alternatePhone, row.email,
-            row.occupation, row.address, row.isPrimary ? 1 : 0, row.isEmergencyContact ? 1 : 0, row.canReceiveNotifications ? 1 : 0]
-        );
+        for (const row of normalizedRows) {
+          const student = await get(`SELECT id FROM students WHERE tenant_id = ? AND LOWER(student_code) = LOWER(?) AND deleted_at IS NULL`, [tenantId, row.studentCode]);
+          if (!student) {
+            throw importRequestError(409, 'Import conflicts changed after validation; run a new dry run', 'IMPORT_STALE');
+          }
+          const duplicate = await get(
+            `SELECT id FROM student_guardians WHERE tenant_id = ? AND student_id = ? AND LOWER(name) = LOWER(?) AND COALESCE(phone, '') = COALESCE(?, '')`,
+            [tenantId, String(student.id), row.name, row.phone]
+          );
+          const primary = row.isPrimary && await get(`SELECT id FROM student_guardians WHERE tenant_id = ? AND student_id = ? AND is_primary = 1`, [tenantId, String(student.id)]);
+          if (duplicate || primary) {
+            throw importRequestError(409, 'Import conflicts changed after validation; run a new dry run', 'IMPORT_STALE');
+          }
+        }
       } else if (batch.entity_type === 'FEE_OPENING_BALANCE') {
-        const student = await get(`SELECT id FROM students WHERE tenant_id = ? AND LOWER(student_code) = LOWER(?) AND deleted_at IS NULL`, [tenantId, row.studentCode]);
-        if (!student) throw new Error('Fee opening balance import became stale; run a new dry run');
-        entityId = crypto.randomUUID();
-        await run(
-          `INSERT INTO student_fee_plans
-            (id, tenant_id, student_id, course_name, academic_year, total_amount, discount_amount,
-             payable_amount, paid_amount, pending_amount, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, ?, 'ACTIVE', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-          [entityId, tenantId, String(student.id), row.courseName, row.academicYear, row.openingBalance, row.openingBalance, row.openingBalance]
-        );
-        await run(
-          `INSERT INTO student_fee_installments
-            (id, tenant_id, student_fee_plan_id, installment_number, title, amount, paid_amount, pending_amount, due_date, status, created_at, updated_at)
-           VALUES (?, ?, ?, 1, 'Opening Balance', ?, 0, ?, ?, 'PENDING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-          [crypto.randomUUID(), tenantId, entityId, row.openingBalance, row.openingBalance, row.dueDate]
-        );
-      } else throw new Error('Unsupported import entity type');
-      inserted.push(entityId);
-      await run(`UPDATE data_import_rows SET status = 'IMPORTED', entity_id = ? WHERE id = ? AND tenant_id = ?`, [entityId, rowRecord.id, tenantId]);
-    }
+        for (const row of normalizedRows) {
+          const student = await get(`SELECT id FROM students WHERE tenant_id = ? AND LOWER(student_code) = LOWER(?) AND deleted_at IS NULL`, [tenantId, row.studentCode]);
+          if (!student) {
+            throw importRequestError(409, 'Import conflicts changed after validation; run a new dry run', 'IMPORT_STALE');
+          }
+          const existing = await get(
+            `SELECT id FROM student_fee_plans WHERE tenant_id = ? AND student_id = ? AND LOWER(course_name) = LOWER(?) AND LOWER(academic_year) = LOWER(?) AND status NOT IN ('REVERSED', 'CANCELLED')`,
+            [tenantId, String(student.id), row.courseName, row.academicYear]
+          );
+          if (existing) {
+            throw importRequestError(409, 'Import conflicts changed after validation; run a new dry run', 'IMPORT_STALE');
+          }
+        }
+      }
+
+      let importedRows = 0;
+      for (let index = 0; index < importRows.length; index += 1) {
+        const rowRecord = importRows[index];
+        const row = normalizedRows[index];
+        let entityId;
+        if (batch.entity_type === 'STUDENT') {
+          const parts = row.name.split(/\s+/);
+          const result = await run(
+            `INSERT INTO students
+            (tenant_id, student_code, name, student_name, display_name, first_name, last_name, grade, class_level,
+             student_email, student_phone, parent_name, parent_phone, date_of_birth, admission_date, status,
+             data, legacy_data, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [tenantId, row.studentCode, row.name, row.name, row.name, parts[0], parts.length > 1 ? parts.slice(1).join(' ') : null,
+              row.classLevel, row.classLevel, row.studentEmail, row.studentPhone, row.parentName, row.parentPhone,
+              row.dateOfBirth, row.admissionDate, row.status]
+          );
+          entityId = String(result.lastID);
+        } else if (batch.entity_type === 'GUARDIAN') {
+          const student = await get(`SELECT id FROM students WHERE tenant_id = ? AND LOWER(student_code) = LOWER(?) AND deleted_at IS NULL`, [tenantId, row.studentCode]);
+          if (!student) throw importRequestError(409, 'Guardian import became stale; run a new dry run', 'IMPORT_STALE');
+          if (row.isPrimary && await get(`SELECT id FROM student_guardians WHERE tenant_id = ? AND student_id = ? AND is_primary = 1`, [tenantId, String(student.id)])) {
+            throw importRequestError(409, 'Guardian import became stale; run a new dry run', 'IMPORT_STALE');
+          }
+          entityId = crypto.randomUUID();
+          await run(
+            `INSERT INTO student_guardians
+              (id, tenant_id, student_id, name, relationship, phone, alternate_phone, email, occupation, address,
+               is_primary, is_emergency_contact, can_receive_notifications, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [entityId, tenantId, String(student.id), row.name, row.relationship, row.phone, row.alternatePhone, row.email,
+              row.occupation, row.address, row.isPrimary ? 1 : 0, row.isEmergencyContact ? 1 : 0, row.canReceiveNotifications ? 1 : 0]
+          );
+        } else if (batch.entity_type === 'FEE_OPENING_BALANCE') {
+          const student = await get(`SELECT id FROM students WHERE tenant_id = ? AND LOWER(student_code) = LOWER(?) AND deleted_at IS NULL`, [tenantId, row.studentCode]);
+          if (!student) throw importRequestError(409, 'Fee opening balance import became stale; run a new dry run', 'IMPORT_STALE');
+          entityId = crypto.randomUUID();
+          await run(
+            `INSERT INTO student_fee_plans
+              (id, tenant_id, student_id, course_name, academic_year, total_amount, discount_amount,
+               payable_amount, paid_amount, pending_amount, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, ?, 'ACTIVE', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [entityId, tenantId, String(student.id), row.courseName, row.academicYear, row.openingBalance, row.openingBalance, row.openingBalance]
+          );
+          await run(
+            `INSERT INTO student_fee_installments
+              (id, tenant_id, student_fee_plan_id, installment_number, title, amount, paid_amount, pending_amount, due_date, status, created_at, updated_at)
+             VALUES (?, ?, ?, 1, 'Opening Balance', ?, 0, ?, ?, 'PENDING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [crypto.randomUUID(), tenantId, entityId, row.openingBalance, row.openingBalance, row.dueDate]
+          );
+        } else throw new Error('Unsupported import entity type');
+        importedRows += 1;
+        await run(`UPDATE data_import_rows SET status = 'IMPORTED', entity_id = ? WHERE id = ? AND tenant_id = ?`, [entityId, rowRecord.id, tenantId]);
+      }
+
+      const committed = await run(
+        `UPDATE data_import_batches
+         SET status = 'COMMITTED', committed_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND tenant_id = ? AND status = 'COMMITTING'`,
+        [batch.id, tenantId]
+      );
+      if (Number(committed.changes) !== 1) {
+        throw importRequestError(409, 'Import batch state changed while committing', 'IMPORT_STALE');
+      }
+      await createAuditLog({
+        tenantId,
+        actorUserId: req.user.id,
+        action: `${batch.entity_type}_IMPORT_COMMITTED`,
+        entityType: 'data_import_batch',
+        entityId: batch.id,
+        newValues: { importedRows },
+      });
+      return { batchId: batch.id, entityType: batch.entity_type, status: 'COMMITTED', importedRows };
+    });
+
+    return res.json(result);
   } catch (error) {
-    for (const entityId of inserted.reverse()) {
-      if (batch.entity_type === 'GUARDIAN') await run(`DELETE FROM student_guardians WHERE id = ? AND tenant_id = ?`, [entityId, tenantId]);
-      else if (batch.entity_type === 'FEE_OPENING_BALANCE') {
-        await run(`DELETE FROM student_fee_installments WHERE student_fee_plan_id = ? AND tenant_id = ?`, [entityId, tenantId]);
-        await run(`DELETE FROM student_fee_plans WHERE id = ? AND tenant_id = ?`, [entityId, tenantId]);
-      } else await run(`DELETE FROM students WHERE id = ? AND tenant_id = ?`, [entityId, tenantId]);
-    }
-    await run(`UPDATE data_import_rows SET status = 'VALID', entity_id = NULL WHERE batch_id = ? AND tenant_id = ?`, [batch.id, tenantId]);
-    await run(`UPDATE data_import_batches SET status = 'VALIDATED' WHERE id = ? AND tenant_id = ?`, [batch.id, tenantId]);
-    throw error;
+    if (error instanceof ImportRequestError) return sendImportRequestError(res, error);
+    return next(error);
   }
-  await run(`UPDATE data_import_batches SET status = 'COMMITTED', committed_at = CURRENT_TIMESTAMP WHERE id = ? AND tenant_id = ?`, [batch.id, tenantId]);
-  await createAuditLog({ tenantId, actorUserId: req.user.id, action: `${batch.entity_type}_IMPORT_COMMITTED`, entityType: 'data_import_batch', entityId: batch.id, newValues: { importedRows: inserted.length } });
-  res.json({ batchId: batch.id, entityType: batch.entity_type, status: 'COMMITTED', importedRows: inserted.length });
 });
 
-router.post('/:batchId/rollback', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
+router.post('/:batchId/rollback', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res, next) => {
   const tenantId = currentTenantId(req);
-  const batch = await get(`SELECT id, entity_type, status FROM data_import_batches WHERE id = ? AND tenant_id = ?`, [req.params.batchId, tenantId]);
-  if (!batch) return res.status(404).json({ error: 'Import batch not found' });
-  if (batch.status !== 'COMMITTED') return res.status(409).json({ error: `Import batch cannot be rolled back from ${batch.status}` });
-  const importedRows = await all(`SELECT id, entity_id FROM data_import_rows WHERE batch_id = ? AND tenant_id = ? AND status = 'IMPORTED'`, [batch.id, tenantId]);
-  if (batch.entity_type === 'FEE_OPENING_BALANCE') {
-    for (const row of importedRows) {
-      const payment = await get(
-        `SELECT id FROM fee_payments WHERE tenant_id = ? AND student_fee_plan_id = ? AND COALESCE(status, 'CAPTURED') NOT IN ('CANCELLED', 'Cancelled')`,
-        [tenantId, row.entity_id]
+
+  try {
+    const result = await transaction(async () => {
+      const batch = await get(
+        `SELECT id, entity_type, status
+         FROM data_import_batches
+         WHERE id = ? AND tenant_id = ?`,
+        [req.params.batchId, tenantId]
       );
-      if (payment) return res.status(409).json({ error: 'Cannot reverse an opening balance after a payment has been posted', code: 'IMPORT_HAS_DEPENDENCIES' });
-    }
+      if (!batch) throw importRequestError(404, 'Import batch not found');
+      if (batch.status !== 'COMMITTED') {
+        throw importRequestError(409, `Import batch cannot be rolled back from ${batch.status}`);
+      }
+
+      const claim = await run(
+        `UPDATE data_import_batches
+         SET status = 'ROLLING_BACK'
+         WHERE id = ? AND tenant_id = ? AND status = 'COMMITTED'`,
+        [batch.id, tenantId]
+      );
+      if (Number(claim.changes) !== 1) {
+        throw importRequestError(409, 'Import batch is already being rolled back', 'IMPORT_STALE');
+      }
+
+      const importedRows = await all(
+        `SELECT id, entity_id
+         FROM data_import_rows
+         WHERE batch_id = ? AND tenant_id = ? AND status = 'IMPORTED'
+         ORDER BY row_number`,
+        [batch.id, tenantId]
+      );
+      if (batch.entity_type === 'FEE_OPENING_BALANCE') {
+        for (const row of importedRows) {
+          const payment = await get(
+            `SELECT id FROM fee_payments WHERE tenant_id = ? AND student_fee_plan_id = ? AND COALESCE(status, 'CAPTURED') NOT IN ('CANCELLED', 'Cancelled')`,
+            [tenantId, row.entity_id]
+          );
+          if (payment) {
+            throw importRequestError(409, 'Cannot reverse an opening balance after a payment has been posted', 'IMPORT_HAS_DEPENDENCIES');
+          }
+        }
+      }
+
+      for (const row of importedRows) {
+        if (batch.entity_type === 'GUARDIAN') {
+          await run(`DELETE FROM student_guardians WHERE tenant_id = ? AND id = ?`, [tenantId, row.entity_id]);
+        } else if (batch.entity_type === 'FEE_OPENING_BALANCE') {
+          await run(`UPDATE student_fee_installments SET status = 'REVERSED', pending_amount = 0, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND student_fee_plan_id = ?`, [tenantId, row.entity_id]);
+          await run(`UPDATE student_fee_plans SET status = 'REVERSED', pending_amount = 0, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND id = ?`, [tenantId, row.entity_id]);
+        } else {
+          await run(`DELETE FROM batch_students WHERE tenant_id = ? AND student_id = ?`, [tenantId, row.entity_id]);
+          await run(`DELETE FROM students WHERE tenant_id = ? AND id = ?`, [tenantId, row.entity_id]);
+        }
+        await run(`UPDATE data_import_rows SET status = 'ROLLED_BACK' WHERE id = ? AND tenant_id = ?`, [row.id, tenantId]);
+      }
+
+      const rolledBack = await run(
+        `UPDATE data_import_batches
+         SET status = 'ROLLED_BACK', rolled_back_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND tenant_id = ? AND status = 'ROLLING_BACK'`,
+        [batch.id, tenantId]
+      );
+      if (Number(rolledBack.changes) !== 1) {
+        throw importRequestError(409, 'Import batch state changed while rolling back', 'IMPORT_STALE');
+      }
+      await createAuditLog({
+        tenantId,
+        actorUserId: req.user.id,
+        action: `${batch.entity_type}_IMPORT_ROLLED_BACK`,
+        entityType: 'data_import_batch',
+        entityId: batch.id,
+        newValues: { rolledBackRows: importedRows.length },
+      });
+      return { batchId: batch.id, entityType: batch.entity_type, status: 'ROLLED_BACK', rolledBackRows: importedRows.length };
+    });
+
+    return res.json(result);
+  } catch (error) {
+    if (error instanceof ImportRequestError) return sendImportRequestError(res, error);
+    return next(error);
   }
-  for (const row of importedRows) {
-    if (batch.entity_type === 'GUARDIAN') await run(`DELETE FROM student_guardians WHERE tenant_id = ? AND id = ?`, [tenantId, row.entity_id]);
-    else if (batch.entity_type === 'FEE_OPENING_BALANCE') {
-      await run(`UPDATE student_fee_installments SET status = 'REVERSED', pending_amount = 0, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND student_fee_plan_id = ?`, [tenantId, row.entity_id]);
-      await run(`UPDATE student_fee_plans SET status = 'REVERSED', pending_amount = 0, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND id = ?`, [tenantId, row.entity_id]);
-    }
-    else {
-      await run(`DELETE FROM batch_students WHERE tenant_id = ? AND student_id = ?`, [tenantId, row.entity_id]);
-      await run(`DELETE FROM students WHERE tenant_id = ? AND id = ?`, [tenantId, row.entity_id]);
-    }
-    await run(`UPDATE data_import_rows SET status = 'ROLLED_BACK' WHERE id = ? AND tenant_id = ?`, [row.id, tenantId]);
-  }
-  await run(`UPDATE data_import_batches SET status = 'ROLLED_BACK', rolled_back_at = CURRENT_TIMESTAMP WHERE id = ? AND tenant_id = ?`, [batch.id, tenantId]);
-  await createAuditLog({ tenantId, actorUserId: req.user.id, action: `${batch.entity_type}_IMPORT_ROLLED_BACK`, entityType: 'data_import_batch', entityId: batch.id, newValues: { rolledBackRows: importedRows.length } });
-  res.json({ batchId: batch.id, entityType: batch.entity_type, status: 'ROLLED_BACK', rolledBackRows: importedRows.length });
 });
 
 module.exports = router;

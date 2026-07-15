@@ -4,7 +4,7 @@ ProTrack Institute OS is a Vite + React frontend with an Express API and a raw-S
 
 ## Local setup
 
-1. Install frontend dependencies from the repository root:
+1. Install dependencies from the repository root:
 
    ```bash
    npm install
@@ -12,17 +12,17 @@ ProTrack Institute OS is a Vite + React frontend with an Express API and a raw-S
 
 2. Copy `.env.example` to `.env` and replace the placeholder secrets.
 
-3. Start the API on port `4000`:
-
-   ```bash
-   npm run start:server
-   ```
-
-4. Start the Vite frontend on port `5173` in another terminal:
+3. Start the frontend and API together:
 
    ```bash
    npm run dev
    ```
+
+To start only the API on port `4000`, run:
+
+```bash
+npm run start:server
+```
 
 The default local URLs are:
 
@@ -57,15 +57,23 @@ REFRESH_TOKEN_DAYS=30
 RESET_PASSWORD_TOKEN_MINUTES=30
 EMAIL_VERIFICATION_TOKEN_HOURS=24
 INVITE_TOKEN_DAYS=7
+OWNER_RECOVERY_TOKEN_HOURS=24
 TRIAL_DAYS=14
 ALLOW_REGISTRATION=false
+WHATSAPP_WEBHOOK_VERIFY_TOKEN=replace-with-a-random-webhook-token
+WHATSAPP_APP_SECRET=replace-with-the-meta-app-secret
+RAZORPAY_WEBHOOK_SECRET=replace-with-the-razorpay-webhook-secret
 ```
 
-Use `MAIL_FROM`, not `SMTP_FROM`. Use `JWT_ACCESS_EXPIRES_IN`, not `JWT_EXPIRES_IN`. `CORS_ORIGINS` is a comma-separated allowlist and must contain every trusted browser origin. Set `TRUST_PROXY=true` only when the API is behind a trusted reverse proxy so rate limiting receives the real client IP.
+`APP_URL` is the public frontend origin used by email links and Playwright. `API_URL` is the API base URL used by the frontend, Playwright, and smoke tests. Keep its path ending in `/api`. The local API listens on `PORT=4000`; a production reverse proxy may expose `API_URL` on a different public port.
+
+`JWT_ACCESS_EXPIRES_IN` controls the short-lived access JWT and accepts durations such as `15m` or `1h`. Refresh tokens are opaque, stored tokens rather than JWTs, so `REFRESH_TOKEN_DAYS` controls their database expiry. `EMAIL_VERIFICATION_TOKEN_HOURS`, `INVITE_TOKEN_DAYS`, and `OWNER_RECOVERY_TOKEN_HOURS` control the corresponding one-time-token lifetimes. `ALLOW_REGISTRATION` controls the legacy public registration endpoint; institute onboarding remains a separate flow.
+
+`CORS_ORIGINS` is a comma-separated allowlist and must contain every trusted browser origin. Set `TRUST_PROXY=true` only when the API is behind a trusted reverse proxy so rate limiting receives the real client IP.
 
 For PostgreSQL, replace `DATABASE_URL` with a PostgreSQL connection string. Set `DATABASE_SSL=true` only when the provider requires TLS with the current compatibility mode.
 
-Production startup also requires the email, WhatsApp, Razorpay, and tenant-bootstrap variables listed in `.env.example`.
+Production startup also requires the email, WhatsApp, Razorpay, webhook-verification, and tenant-bootstrap variables listed in `.env.example`. WhatsApp is configured by its access token, phone-number ID, API version, webhook verification token, and app secret; it has no separate feature-enable flag or configurable provider base URL. Runtime data and backup paths remain repository-managed under the ignored `storage/` directory rather than an environment-configured storage path.
 
 ## Security behavior
 
@@ -79,25 +87,24 @@ Production startup also requires the email, WhatsApp, Razorpay, and tenant-boots
 
 ## Commands
 
-- `npm run dev` — start the Vite frontend
+- `npm run dev` — start the Vite frontend and Express API
 - `npm run build` — build the frontend
 - `npm run preview` — preview the production frontend build
 - `npm run start:server` — start the Express API
 - `npm run start:server:production` — start the API with `NODE_ENV=production`
-- `npm run test:smoke` — run API smoke tests against a running backend
-- `npm run test:ui` — run Playwright UI tests
+- `npm run test:smoke` — run API smoke tests; for a local `API_URL`, the test starts the API when needed
+- `npm run test:ui` — run Playwright UI tests; Playwright starts both local services
+- `npm run verify` — run the complete clean-checkout verification gate
 
 ## Tests
 
-For smoke tests, start the API first and provide valid administrator credentials:
+Smoke tests read `API_URL`, `ADMIN_USERNAME`, and `ADMIN_PASSWORD` from `.env`. When `API_URL` targets localhost and the API is not already healthy, the smoke runner starts and later stops it automatically:
 
 ```powershell
-$env:SMOKE_USERNAME="admin"
-$env:SMOKE_PASSWORD="your-admin-password"
 npm run test:smoke
 ```
 
-Playwright starts the API at `http://127.0.0.1:4000` and the frontend at `http://127.0.0.1:5173` unless the corresponding test environment variables override them.
+Playwright uses the same `API_URL` and `APP_URL`. With `.env.example`, it starts the API at `http://localhost:4000/api` and the frontend at `http://localhost:5173`.
 
 ## Data-store policy
 

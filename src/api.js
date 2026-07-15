@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:4000/api';
+const apiUrl = __API_URL__;
 
 export function getToken() {
   return localStorage.getItem('tps_token');
@@ -82,7 +82,7 @@ async function request(path, options = {}) {
   headers['Content-Type'] = 'application/json';
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const res = await fetch(`${apiUrl}${path}`, { ...options, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     if (res.status === 401 && /token/i.test(err.error || '')) {
@@ -129,7 +129,7 @@ async function platformRequest(path, options = {}) {
   headers['Content-Type'] = 'application/json';
   const token = getPlatformToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const res = await fetch(`${apiUrl}${path}`, { ...options, headers });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     if (res.status === 401) removePlatformToken();

@@ -39,6 +39,15 @@ const corsOriginsSchema = z
   .transform((value) => [...new Set(value.split(',').map((origin) => origin.trim()).filter(Boolean))])
   .pipe(z.array(z.string().url('Each CORS origin must be a valid URL')).min(1));
 
+const applicationUrlSchema = (name) => z
+  .string()
+  .url(`${name} must be a valid URL`)
+  .transform((value) => value.replace(/\/+$/, ''));
+
+const jwtDurationSchema = z
+  .string()
+  .regex(/^\d+(?:ms|s|m|h|d|w|y)$/i, 'JWT_ACCESS_EXPIRES_IN must be a duration such as 15m or 1h');
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters long'),
@@ -51,8 +60,8 @@ const envSchema = z.object({
     }),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   DATABASE_SSL: booleanStringSchema,
-  APP_URL: z.string().url('APP_URL must be a valid URL'),
-  API_URL: z.string().url('API_URL must be a valid URL'),
+  APP_URL: applicationUrlSchema('APP_URL'),
+  API_URL: applicationUrlSchema('API_URL'),
   CORS_ORIGINS: corsOriginsSchema,
   TRUST_PROXY: optionalBooleanStringSchema,
   JSON_BODY_LIMIT: requestSizeSchema.default('1mb'),
@@ -63,7 +72,7 @@ const envSchema = z.object({
   PASSWORD_RESET_RATE_LIMIT_MAX: positiveIntegerSchema('PASSWORD_RESET_RATE_LIMIT_MAX', 5),
   ONBOARDING_RATE_LIMIT_MAX: positiveIntegerSchema('ONBOARDING_RATE_LIMIT_MAX', 3),
   PUBLIC_ENQUIRY_RATE_LIMIT_MAX: positiveIntegerSchema('PUBLIC_ENQUIRY_RATE_LIMIT_MAX', 20),
-  JWT_ACCESS_EXPIRES_IN: z.string().default('15m'),
+  JWT_ACCESS_EXPIRES_IN: jwtDurationSchema.default('15m'),
   REFRESH_TOKEN_DAYS: positiveIntegerSchema('REFRESH_TOKEN_DAYS', 30),
   RESET_PASSWORD_TOKEN_MINUTES: positiveIntegerSchema('RESET_PASSWORD_TOKEN_MINUTES', 30),
   EMAIL_VERIFICATION_TOKEN_HOURS: positiveIntegerSchema('EMAIL_VERIFICATION_TOKEN_HOURS', 24),

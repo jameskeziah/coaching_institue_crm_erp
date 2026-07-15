@@ -1,20 +1,30 @@
 import { spawn, spawnSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
 
-const API_BASE = process.env.API_BASE || 'http://localhost:4000/api';
-const username = process.env.SMOKE_USERNAME || process.env.ADMIN_USERNAME || 'admin';
-const password = process.env.SMOKE_PASSWORD || process.env.ADMIN_PASSWORD || 'MirakuAdmin2026!';
+const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+dotenv.config({ path: path.join(workspaceRoot, '.env'), quiet: true });
+
+const apiUrl = (process.env.API_URL || 'http://localhost:4000/api').replace(/\/+$/, '');
+const username = process.env.ADMIN_USERNAME;
+const password = process.env.ADMIN_PASSWORD;
+
+if (!username || !password) {
+  throw new Error('Smoke tests require ADMIN_USERNAME and ADMIN_PASSWORD.');
+}
 
 let managedServer = null;
 
 function healthUrl() {
-  const url = new URL(API_BASE);
+  const url = new URL(apiUrl);
   const path = url.pathname.replace(/\/$/, '');
   url.pathname = `${path}/health`;
   return url.toString();
 }
 
 function canManageApiServer() {
-  const url = new URL(API_BASE);
+  const url = new URL(apiUrl);
   return ['localhost', '127.0.0.1', '::1'].includes(url.hostname);
 }
 
@@ -32,8 +42,8 @@ async function ensureApiAvailable() {
   if (await isApiHealthy()) return;
   if (!canManageApiServer()) return;
 
-  const command = process.platform === 'win32' ? 'npm.cmd run start:server' : 'npm';
-  const args = process.platform === 'win32' ? [] : ['run', 'start:server'];
+  const command = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const args = ['run', 'start:server'];
   managedServer = spawn(command, args, {
     cwd: process.cwd(),
     stdio: 'ignore',
@@ -61,7 +71,7 @@ function stopManagedServer() {
 
 async function request(path, options = {}) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const response = await fetch(`${apiUrl}${path}`, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(`${options.method || 'GET'} ${path} failed: ${body.error || response.statusText}`);
@@ -71,7 +81,7 @@ async function request(path, options = {}) {
 
 async function requestRaw(path, options = {}) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const response = await fetch(`${apiUrl}${path}`, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   return { response, body };
 }
@@ -648,7 +658,11 @@ async function main() {
   if (!Array.isArray(attendanceReports.dailyAbsent)) throw new Error('Attendance daily absent report failed');
   if (!attendanceReports.teacherWise?.length) throw new Error('Teacher-wise attendance report failed');
   if (!attendanceReports.teacherCompletion?.length) throw new Error('Teacher attendance completion report failed');
-  if (!attendanceReports.parentAlertLogs?.length) throw new Error('Attendance parent alert report failed');
+  const alertReportMonth = new Date().toISOString().slice(0, 7);
+  const parentAlertReport = alertReportMonth === '2026-06'
+    ? attendanceReports
+    : await request(`/attendance/reports?month=${alertReportMonth}`, withAuth(token));
+  if (!parentAlertReport.parentAlertLogs?.length) throw new Error('Attendance parent alert report failed');
   const attendanceCalendar = await request(`/attendance/calendar?batchId=${encodeURIComponent(batchMaster.data.id)}&month=6&year=2026`, withAuth(token));
   if (!attendanceCalendar.data?.sessions?.some((row) => String(row.id) === String(attendanceSession.id) && row.status === 'SUBMITTED')) {
     throw new Error('Attendance calendar did not include submitted session');

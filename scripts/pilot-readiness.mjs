@@ -61,7 +61,7 @@ try {
   add('tenant_exists', Boolean(tenant), tenant ? `Tenant ${tenant.id} selected.` : 'Tenant was not found.');
   if (tenant) {
     const status = String(tenant.status || '').toLowerCase();
-    add('tenant_lifecycle', ['trial', 'active'].includes(status), `Tenant status is ${status || 'missing'}.`);
+    add('tenant_lifecycle', ['trialing', 'active'].includes(status), `Tenant status is ${status || 'missing'}.`);
     const owner = (await client.query(
       `SELECT id, email_verified_at FROM users WHERE tenant_id = $1 AND role = 'owner' AND deleted_at IS NULL AND is_active = 1 ORDER BY id LIMIT 1`,
       [tenant.id]
@@ -98,7 +98,7 @@ add('tested_restore', restoreFresh && restoreMatches, restoreProof ? `Restore pr
 
 const verificationProof = readJson(path.join(readinessDirectory, 'latest-verification-proof.json'));
 const verificationFresh = Boolean(verificationProof?.verifiedAt) && ageHours(verificationProof.verifiedAt) <= maxVerificationAgeHours;
-const requiredStages = ['build', 'check:legacy', 'check:tenant', 'test:data-safety', 'test:mail', 'test:authz', 'test:smoke', 'test:ui'];
+const requiredStages = ['build', 'check:env', 'check:legacy', 'check:tenant', 'check:security', 'test:data-safety', 'test:mail', 'test:authz', 'test:imports', 'test:smoke', 'test:ui'];
 const verificationComplete = verificationProof?.status === 'PASSED' && requiredStages.every((stage) => verificationProof.stages?.includes(stage));
 add('recent_full_verification', verificationFresh && verificationComplete, verificationProof ? `Full verification proof is ${ageHours(verificationProof.verifiedAt).toFixed(1)} hours old.` : 'No full verification proof exists.');
 
