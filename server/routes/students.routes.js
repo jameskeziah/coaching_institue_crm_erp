@@ -4,7 +4,7 @@ const { run, all, get } = require('../db');
 const authMiddleware = require('../middleware/auth');
 const { requireTenant } = require('../middleware/tenant');
 const { requireAnyRole } = require('../middleware/rbac');
-const { ROLE_GROUPS } = require('../config/roles');
+const { ROLE_GROUPS, ROLES } = require('../config/roles');
 const { createAuditLog } = require('../services/auditLog.service');
 const { currentTenantId, requireFields } = require('../utils/request');
 
@@ -13,6 +13,20 @@ const STUDENT_STATUSES = new Set(['ACTIVE', 'INACTIVE', 'PROVISIONAL', 'DROPPED'
 const GUARDIAN_RELATIONSHIPS = new Set(['FATHER', 'MOTHER', 'GUARDIAN', 'BROTHER', 'SISTER', 'OTHER']);
 const DOCUMENT_TYPES = new Set(['PHOTO', 'AADHAAR', 'BIRTH_CERTIFICATE', 'SCHOOL_ID', 'MARKSHEET', 'TRANSFER_CERTIFICATE', 'CASTE_CERTIFICATE', 'SCHOLARSHIP_DOCUMENT', 'FEE_PROOF', 'OTHER']);
 const DOCUMENT_STATUSES = new Set(['UPLOADED', 'VERIFIED', 'REJECTED', 'EXPIRED']);
+const FULL_FOLLOWUP_ROLES = new Set(ROLE_GROUPS.MANAGEMENT);
+const FOLLOWUP_READER_ROLES = [
+  ...ROLE_GROUPS.MANAGEMENT,
+  ROLES.COUNSELLOR,
+  ROLES.TEACHER,
+];
+const FOLLOWUP_CATEGORIES = new Set([
+  'ACADEMIC',
+  'COUNSELLING',
+  'ATTENDANCE',
+  'FINANCIAL',
+  'GUARDIAN_COMMUNICATION',
+  'OPERATIONAL',
+]);
 
 function boolInt(value, fallback = false) {
   if (value === undefined) return fallback ? 1 : 0;
@@ -28,6 +42,119 @@ function serialize(row) {
   }));
 }
 
+function roleOf(req) {
+  return String(req.user?.role || '');
+}
+
+function isFullFollowupRole(req) {
+  return FULL_FOLLOWUP_ROLES.has(roleOf(req));
+}
+
+function normalizeFollowupCategory(value, fallback = 'OPERATIONAL') {
+  const normalized = String(value || '').trim().toUpperCase();
+  return FOLLOWUP_CATEGORIES.has(normalized) ? normalized : fallback;
+}
+
+function inferFollowupCategory(input = {}) {
+  const explicit = normalizeFollowupCategory(input.taskCategory || input.task_category || input.category, null);
+  if (explicit) return explicit;
+
+  const text = `${input.taskType || ''} ${input.linkedType || ''}`.toUpperCase();
+  if (text.includes('ACADEMIC')) return 'ACADEMIC';
+  if (text.includes('ATTENDANCE')) return 'ATTENDANCE';
+  if (text.includes('FEE') || text.includes('PAYMENT')) return 'FINANCIAL';
+  if (text.includes('PARENT') || text.includes('GUARDIAN')) return 'GUARDIAN_COMMUNICATION';
+  if (text.includes('COUNSELL')) return 'COUNSELLING';
+  return 'OPERATIONAL';
+}
+
+function managementStudentDto(row) {
+  return serialize(row);
+}
+
+function restrictedStudentDto(row) {
+  return {
+    id: row.id,
+    studentCode: row.student_code || row.studentCode || null,
+    name: row.display_name || row.student_name || row.name || null,
+    displayName: row.display_name || row.student_name || row.name || null,
+    classLevel: row.class_level || row.grade || null,
+    status: row.status || null,
+    branchId: row.branch_id || row.branchId || null,
+    branchName: row.branch_name || row.branchName || null,
+    courseId: row.primary_course_id || row.primaryCourseId || null,
+    courseName: row.course_name || row.courseName || null,
+    primaryBatchId: row.primary_batch_id || row.primaryBatchId || null,
+    primaryBatchName: row.primary_batch_name || row.primaryBatchName || null,
+  };
+}
+
+function studentDtoForRole(row, role) {
+  return FULL_FOLLOWUP_ROLES.has(role) ? managementStudentDto(row) : restrictedStudentDto(row);
+}
+
+function managementFollowupDto(row) {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id ?? row.tenantId,
+    studentId: row.student_id ?? row.studentId,
+    taskType: row.taskType,
+    title: row.title || row.taskType,
+    description: row.description || row.notes || null,
+    notes: row.notes || null,
+    status: row.status,
+    priority: row.priority,
+    dueDate: row.dueDate,
+    assignedTo: row.assignedTo,
+    assignedToUserId: row.assigned_to_user_id ?? row.assignedToUserId ?? null,
+    taskCategory: row.task_category ?? row.taskCategory,
+    visibilityScope: row.visibility_scope ?? row.visibilityScope,
+    linkedType: row.linkedType,
+    linkedId: row.linkedId,
+    riskReason: row.risk_reason ?? row.riskReason ?? null,
+    completionOutcome: row.completionOutcome,
+    completedAt: row.completedAt,
+    completedBy: row.completedBy,
+    createdBy: row.createdBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function restrictedFollowupDto(row) {
+  return {
+    id: row.id,
+    studentId: row.student_id ?? row.studentId,
+    action: row.title || row.taskType,
+    type: row.taskType,
+    dueDate: row.dueDate,
+    status: row.status,
+    priority: row.priority,
+  };
+}
+
+function attendanceFollowupDto(row) {
+  return {
+    id: row.id,
+    studentId: row.student_id ?? row.studentId,
+    action: row.title || row.taskType,
+    dueDate: row.dueDate,
+    status: row.status,
+    priority: row.priority,
+  };
+}
+
+function attendanceRowDto(row) {
+  return {
+    id: row.id,
+    date: row.date || row.session_date || null,
+    batch: row.batch || row.batch_id || null,
+    subject: row.subject || null,
+    status: row.status,
+    markedAt: row.marked_at || row.markedAt || null,
+  };
+}
+
 async function getTenantStudent(req, studentId) {
   return get(
     `SELECT s.*, br.name AS branch_name, c.name AS course_name, b.name AS primary_batch_name
@@ -38,6 +165,189 @@ async function getTenantStudent(req, studentId) {
      WHERE s.id = ? AND s.tenant_id = ? AND s.deleted_at IS NULL`,
     [studentId, currentTenantId(req)]
   );
+}
+
+async function teacherCanAccessStudent({ tenantId, studentId, userId }) {
+  const row = await get(
+    `SELECT 1 AS allowed
+     FROM batch_students bs
+     JOIN batch_teachers bt
+       ON bt.tenant_id = bs.tenant_id
+      AND bt.batch_id = bs.batch_id
+      AND bt.status = 'ACTIVE'
+     JOIN teachers t
+       ON CAST(t.id AS TEXT) = CAST(bt.teacher_id AS TEXT)
+      AND CAST(t.tenant_id AS TEXT) = CAST(bt.tenant_id AS TEXT)
+      AND CAST(t.user_id AS TEXT) = CAST(? AS TEXT)
+     WHERE CAST(bs.tenant_id AS TEXT) = CAST(? AS TEXT)
+       AND CAST(bs.student_id AS TEXT) = CAST(? AS TEXT)
+       AND bs.status = 'ACTIVE'
+     LIMIT 1`,
+    [userId, tenantId, studentId]
+  );
+  return Boolean(row);
+}
+
+async function requireRoleScopedStudent(req, student) {
+  if (roleOf(req) !== ROLES.TEACHER) return true;
+  const allowed = await teacherCanAccessStudent({
+    tenantId: currentTenantId(req),
+    studentId: student.id,
+    userId: req.user.id,
+  });
+  return allowed;
+}
+
+async function getManagementFollowups(tenantId, studentId, { limit } = {}) {
+  return all(
+    `SELECT
+       id,
+       tenant_id,
+       student_id,
+       taskType,
+       taskType AS title,
+       notes,
+       status,
+       priority,
+       dueDate,
+       assignedTo,
+       assigned_to_user_id,
+       task_category,
+       visibility_scope,
+       linkedType,
+       linkedId,
+       risk_reason,
+       completionOutcome,
+       completedAt,
+       completedBy,
+       createdBy,
+       createdAt,
+       updatedAt
+     FROM follow_up_tasks
+     WHERE tenant_id = ?
+       AND student_id = ?
+     ORDER BY dueDate DESC, id DESC
+     ${limit ? 'LIMIT ?' : ''}`,
+    limit ? [tenantId, studentId, limit] : [tenantId, studentId]
+  );
+}
+
+async function getAssignedCounsellorFollowups({ tenantId, studentId, userId, limit }) {
+  return all(
+    `SELECT
+       id,
+       student_id,
+       taskType,
+       taskType AS title,
+       status,
+       priority,
+       dueDate
+     FROM follow_up_tasks
+     WHERE tenant_id = ?
+       AND student_id = ?
+       AND CAST(assigned_to_user_id AS TEXT) = CAST(? AS TEXT)
+       AND task_category = 'COUNSELLING'
+     ORDER BY dueDate ASC, id DESC
+     ${limit ? 'LIMIT ?' : ''}`,
+    limit ? [tenantId, studentId, userId, limit] : [tenantId, studentId, userId]
+  );
+}
+
+async function getTeacherAcademicFollowups(tenantId, studentId, { limit } = {}) {
+  return all(
+    `SELECT
+       id,
+       student_id,
+       taskType,
+       taskType AS title,
+       status,
+       priority,
+       dueDate
+     FROM follow_up_tasks
+     WHERE tenant_id = ?
+       AND student_id = ?
+       AND task_category = 'ACADEMIC'
+     ORDER BY dueDate ASC, id DESC
+     ${limit ? 'LIMIT ?' : ''}`,
+    limit ? [tenantId, studentId, limit] : [tenantId, studentId]
+  );
+}
+
+async function getAttendanceFollowups(tenantId, studentId, { restricted = false } = {}) {
+  if (restricted) {
+    return all(
+      `SELECT
+         id,
+         student_id,
+         taskType,
+         taskType AS title,
+         status,
+         priority,
+         dueDate
+       FROM follow_up_tasks
+       WHERE tenant_id = ?
+         AND student_id = ?
+         AND task_category = 'ATTENDANCE'
+       ORDER BY createdAt DESC, id DESC
+       LIMIT 20`,
+      [tenantId, studentId]
+    );
+  }
+
+  return all(
+    `SELECT
+       id,
+       tenant_id,
+       student_id,
+       taskType,
+       taskType AS title,
+       notes,
+       status,
+       priority,
+       dueDate,
+       assignedTo,
+       assigned_to_user_id,
+       task_category,
+       visibility_scope,
+       risk_reason,
+       completionOutcome,
+       completedAt,
+       completedBy,
+       createdBy,
+       createdAt,
+       updatedAt
+     FROM follow_up_tasks
+     WHERE tenant_id = ?
+       AND student_id = ?
+       AND task_category = 'ATTENDANCE'
+     ORDER BY createdAt DESC, id DESC
+     LIMIT 20`,
+    [tenantId, studentId]
+  );
+}
+
+async function getRoleScopedFollowups(req, studentId, { limit } = {}) {
+  const tenantId = currentTenantId(req);
+  const role = roleOf(req);
+
+  if (FULL_FOLLOWUP_ROLES.has(role)) {
+    return (await getManagementFollowups(tenantId, studentId, { limit })).map(managementFollowupDto);
+  }
+
+  if (role === ROLES.COUNSELLOR) {
+    return (await getAssignedCounsellorFollowups({
+      tenantId,
+      studentId,
+      userId: req.user.id,
+      limit,
+    })).map(restrictedFollowupDto);
+  }
+
+  if (role === ROLES.TEACHER) {
+    return (await getTeacherAcademicFollowups(tenantId, studentId, { limit })).map(restrictedFollowupDto);
+  }
+
+  return [];
 }
 
 async function getStudentFeeData(tenantId, studentId) {
@@ -126,9 +436,27 @@ async function getStudentFeeData(tenantId, studentId) {
   };
 }
 
-async function getStudentAttendance(tenantId, studentId) {
+async function getStudentAttendance(tenantId, studentId, { restricted = false } = {}) {
   const rows = await all(
-    `SELECT ar.*, s.date, s.batch, s.course, s.subject, s.teacherName
+    `SELECT
+       ar.id,
+       ar.tenant_id,
+       ar.session_id,
+       ar.student_id,
+       ar.status,
+       ar.markedBy,
+       ar.marked_at,
+       ar.markedAt,
+       ar.markedTime,
+       ar.arrivalTime,
+       ar.remarks,
+       s.date,
+       s.session_date,
+       s.batch,
+       s.batch_id,
+       s.course,
+       s.subject,
+       s.teacherName
      FROM attendance_records ar
      JOIN attendance_sessions s ON s.id = ar.session_id AND s.tenant_id = ar.tenant_id
      WHERE ar.tenant_id = ? AND ar.student_id = ?
@@ -148,13 +476,15 @@ async function getStudentAttendance(tenantId, studentId) {
     if (['Present', 'Late', 'Excused', 'PRESENT', 'LATE', 'EXCUSED'].includes(row.status)) acc[subject].presentCount += 1;
     return acc;
   }, {})).map((row) => ({ ...row, attendancePercentage: row.totalSessions ? Math.round((row.presentCount / row.totalSessions) * 100) : 0 }));
-  const [risk, alerts, followups] = await Promise.all([
-    get(`SELECT * FROM attendance_risk_snapshots WHERE tenant_id = ? AND student_id = ? ORDER BY updated_at DESC LIMIT 1`, [String(tenantId), String(studentId)]),
-    all(`SELECT * FROM communication_events WHERE tenant_id = ? AND student_id = ?
-      AND (event_type LIKE '%ATTENDANCE%' OR event_type IN ('ABSENCE_ALERT', 'LATE_ALERT', 'LOW_ATTENDANCE_WARNING', 'REPEATED_ABSENCE_ALERT'))
-      ORDER BY COALESCE(sent_at, created_at) DESC LIMIT 20`, [String(tenantId), String(studentId)]),
-    all(`SELECT * FROM follow_up_tasks WHERE tenant_id = ? AND student_id = ? AND (risk_reason IS NOT NULL OR taskType LIKE '%Attendance%') ORDER BY createdAt DESC LIMIT 20`, [tenantId, studentId]),
-  ]);
+  const [risk, alerts, followups] = restricted
+    ? [null, [], await getAttendanceFollowups(tenantId, studentId, { restricted: true })]
+    : await Promise.all([
+      get(`SELECT * FROM attendance_risk_snapshots WHERE tenant_id = ? AND student_id = ? ORDER BY updated_at DESC LIMIT 1`, [String(tenantId), String(studentId)]),
+      all(`SELECT * FROM communication_events WHERE tenant_id = ? AND student_id = ?
+        AND (event_type LIKE '%ATTENDANCE%' OR event_type IN ('ABSENCE_ALERT', 'LATE_ALERT', 'LOW_ATTENDANCE_WARNING', 'REPEATED_ABSENCE_ALERT'))
+        ORDER BY COALESCE(sent_at, created_at) DESC LIMIT 20`, [String(tenantId), String(studentId)]),
+      getAttendanceFollowups(tenantId, studentId, { restricted: false }),
+    ]);
   return {
     summary: {
       totalSessions: rows.length,
@@ -165,11 +495,11 @@ async function getStudentAttendance(tenantId, studentId) {
       monthlyAttendancePercentage: monthRows.length ? Math.round((monthPresent / monthRows.length) * 100) : 0,
       lastAbsentDate: rows.find((row) => String(row.status).toUpperCase() === 'ABSENT')?.date || null,
     },
-    rows,
+    rows: restricted ? rows.map(attendanceRowDto) : rows.map(serialize),
     subjectWise,
-    risk: risk ? serialize(risk) : null,
-    parentAlerts: alerts.map(serialize),
-    followups: followups.map(serialize),
+    ...(restricted ? {} : { risk: risk ? serialize(risk) : null }),
+    ...(restricted ? {} : { parentAlerts: alerts.map(serialize) }),
+    followups: followups.map(restricted ? attendanceFollowupDto : managementFollowupDto),
   };
 }
 
@@ -505,7 +835,10 @@ router.put('/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.STU
 router.get('/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.STUDENTS), async (req, res) => {
   const student = await getTenantStudent(req, req.params.id);
   if (!student) return res.status(404).json({ error: 'Student not found' });
-  res.json({ data: serialize(student) });
+  if (!(await requireRoleScopedStudent(req, student))) {
+    return res.status(404).json({ error: 'Student not found' });
+  }
+  res.json({ data: studentDtoForRole(student, roleOf(req)) });
 });
 
 router.patch('/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.ADMISSIONS), async (req, res) => {
@@ -535,15 +868,53 @@ router.patch('/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.A
 
 router.get('/:id/profile', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.STUDENTS), async (req, res) => {
   const tenantId = currentTenantId(req);
+  const role = roleOf(req);
   const student = await getTenantStudent(req, req.params.id);
   if (!student) return res.status(404).json({ error: 'Student not found' });
+
+  if (!(await requireRoleScopedStudent(req, student))) {
+    return res.status(404).json({ error: 'Student not found' });
+  }
+
+  if (!FULL_FOLLOWUP_ROLES.has(role)) {
+    const [academic, attendance, tests, followUps] = await Promise.all([
+      getStudentAcademic(tenantId, student.id),
+      getStudentAttendance(tenantId, student.id, { restricted: true }),
+      getStudentTests(tenantId, student.id),
+      getRoleScopedFollowups(req, student.id, { limit: 10 }),
+    ]);
+    const alerts = [];
+    if (!student.primary_batch_id) alerts.push({ type: 'BATCH_NOT_ASSIGNED', severity: 'HIGH', message: 'No primary batch assigned', actionLabel: 'View Academic', actionUrl: `/students/${student.id}?tab=academic` });
+    if (attendance.summary.totalSessions > 0 && attendance.summary.attendancePercentage < 75) alerts.push({ type: 'LOW_ATTENDANCE', severity: 'HIGH', message: `Attendance is ${attendance.summary.attendancePercentage}%`, actionLabel: 'View Attendance', actionUrl: `/students/${student.id}?tab=attendance` });
+    if (tests.summary.testsAttempted > 0 && tests.summary.averagePercentage < 50) alerts.push({ type: 'POOR_TEST_PERFORMANCE', severity: 'MEDIUM', message: `Average test score is ${tests.summary.averagePercentage}%`, actionLabel: 'View Tests', actionUrl: `/students/${student.id}?tab=tests` });
+
+    return res.json({
+      data: {
+        student: studentDtoForRole(student, role),
+        guardians: [],
+        branch: student.branch_id ? { id: student.branch_id, name: student.branch_name } : null,
+        course: student.primary_course_id ? { id: student.primary_course_id, name: student.course_name } : null,
+        primaryBatch: student.primary_batch_id ? { id: student.primary_batch_id, name: student.primary_batch_name } : null,
+        ...academic,
+        attendanceSummary: attendance.summary,
+        testSummary: tests.summary,
+        recentFollowups: followUps,
+        recentCommunication: [],
+        documents: [],
+        status: student.status,
+        nextFollowup: followUps.find((item) => !['Done', 'Completed'].includes(item.status))?.dueDate || null,
+        alerts,
+      },
+    });
+  }
+
   const [guardians, academic, fees, attendance, tests, followUps, communication, documents] = await Promise.all([
     all(`SELECT * FROM student_guardians WHERE tenant_id = ? AND student_id = ? ORDER BY is_primary DESC, name`, [tenantId, String(student.id)]),
     getStudentAcademic(tenantId, student.id),
     getStudentFeeData(tenantId, student.id),
-    getStudentAttendance(tenantId, student.id),
+    getStudentAttendance(tenantId, student.id, { restricted: false }),
     getStudentTests(tenantId, student.id),
-    all(`SELECT * FROM follow_up_tasks WHERE tenant_id = ? AND student_id = ? ORDER BY dueDate DESC, id DESC LIMIT 10`, [tenantId, student.id]),
+    getManagementFollowups(tenantId, student.id, { limit: 10 }),
     getStudentCommunications(tenantId, student.id),
     all(`SELECT * FROM student_documents WHERE tenant_id = ? AND student_id = ? AND archived_at IS NULL ORDER BY created_at DESC`, [tenantId, String(student.id)]),
   ]);
@@ -571,7 +942,7 @@ router.get('/:id/profile', authMiddleware, requireTenant, requireAnyRole(ROLE_GR
       feeSummary: fees.summary,
       attendanceSummary: attendance.summary,
       testSummary: tests.summary,
-      recentFollowups: followUps.map(serialize),
+      recentFollowups: followUps.map(managementFollowupDto),
       recentCommunication: communication.slice(0, 10),
       documents: documents.map(serialize),
       status: student.status,
@@ -596,7 +967,11 @@ router.get('/:id/fees', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUP
 router.get('/:id/attendance', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.STAFF), async (req, res) => {
   const student = await getTenantStudent(req, req.params.id);
   if (!student) return res.status(404).json({ error: 'Student not found' });
-  res.json({ data: await getStudentAttendance(currentTenantId(req), student.id) });
+  if (!(await requireRoleScopedStudent(req, student))) {
+    return res.status(404).json({ error: 'Student not found' });
+  }
+  const restricted = !FULL_FOLLOWUP_ROLES.has(roleOf(req));
+  res.json({ data: await getStudentAttendance(currentTenantId(req), student.id, { restricted }) });
 });
 
 router.get('/:id/tests', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.STUDENTS), async (req, res) => {
@@ -605,11 +980,39 @@ router.get('/:id/tests', authMiddleware, requireTenant, requireAnyRole(ROLE_GROU
   res.json({ data: await getStudentTests(currentTenantId(req), student.id) });
 });
 
-router.get('/:id/followups', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.STAFF), async (req, res) => {
+router.get('/:id/followups', authMiddleware, requireTenant, requireAnyRole(FOLLOWUP_READER_ROLES), async (req, res) => {
   const student = await getTenantStudent(req, req.params.id);
   if (!student) return res.status(404).json({ error: 'Student not found' });
-  const rows = await all(`SELECT * FROM follow_up_tasks WHERE tenant_id = ? AND student_id = ? ORDER BY dueDate DESC, id DESC`, [currentTenantId(req), student.id]);
-  res.json({ data: rows.map(serialize) });
+  const tenantId = currentTenantId(req);
+  const role = roleOf(req);
+
+  if (FULL_FOLLOWUP_ROLES.has(role)) {
+    const rows = await getManagementFollowups(tenantId, student.id);
+    return res.json({ data: rows.map(managementFollowupDto) });
+  }
+
+  if (role === ROLES.COUNSELLOR) {
+    const rows = await getAssignedCounsellorFollowups({
+      tenantId,
+      studentId: student.id,
+      userId: req.user.id,
+    });
+    return res.json({ data: rows.map(restrictedFollowupDto) });
+  }
+
+  if (role === ROLES.TEACHER) {
+    if (!(await teacherCanAccessStudent({ tenantId, studentId: student.id, userId: req.user.id }))) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    const rows = await getTeacherAcademicFollowups(tenantId, student.id);
+    return res.json({ data: rows.map(restrictedFollowupDto) });
+  }
+
+  return res.status(403).json({
+    message: 'Follow-up access is restricted',
+    code: 'STUDENT_FOLLOWUP_ACCESS_RESTRICTED',
+  });
 });
 
 router.get('/:id/communications', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.STAFF), async (req, res) => {
@@ -794,12 +1197,12 @@ router.delete('/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.
   await run(`DELETE FROM fee_payments WHERE student_id = ? AND tenant_id = ?`, [id, tenantId]);
   await run(`DELETE FROM student_fee_plans WHERE student_id = ? AND tenant_id = ?`, [String(id), tenantId]);
   await run(`DELETE FROM fee_plans WHERE student_id = ? AND tenant_id = ?`, [id, tenantId]);
-  await run(`DELETE FROM parent_alert_logs WHERE student_id = ?`, [id]);
-  await run(`DELETE FROM parent_call_logs WHERE student_id = ?`, [id]);
-  await run(`DELETE FROM attendance_correction_requests WHERE student_id = ?`, [id]);
-  await run(`DELETE FROM attendance_records WHERE student_id = ?`, [id]);
-  await run(`DELETE FROM follow_up_tasks WHERE student_id = ?`, [id]);
-  await run(`DELETE FROM student_history WHERE student_id = ?`, [id]);
+  await run(`DELETE FROM parent_alert_logs WHERE student_id = ? AND tenant_id = ?`, [id, tenantId]);
+  await run(`DELETE FROM parent_call_logs WHERE student_id = ? AND tenant_id = ?`, [id, tenantId]);
+  await run(`DELETE FROM attendance_correction_requests WHERE student_id = ? AND tenant_id = ?`, [id, tenantId]);
+  await run(`DELETE FROM attendance_records WHERE student_id = ? AND tenant_id = ?`, [id, tenantId]);
+  await run(`DELETE FROM follow_up_tasks WHERE student_id = ? AND tenant_id = ?`, [id, tenantId]);
+  await run(`DELETE FROM student_history WHERE student_id = ? AND tenant_id = ?`, [id, tenantId]);
   await run(`DELETE FROM students WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
 
   res.json({ ok: true });

@@ -1,10 +1,77 @@
-const API_BASE = process.env.API_BASE || 'http://localhost:4000/api';
-const username = process.env.SMOKE_USERNAME || process.env.ADMIN_USERNAME || 'admin';
-const password = process.env.SMOKE_PASSWORD || process.env.ADMIN_PASSWORD || 'MirakuAdmin2026!';
+import { spawn, spawnSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
+
+const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+dotenv.config({ path: path.join(workspaceRoot, '.env'), quiet: true });
+
+const apiUrl = (process.env.API_URL || 'http://localhost:4000/api').replace(/\/+$/, '');
+const username = process.env.ADMIN_USERNAME;
+const password = process.env.ADMIN_PASSWORD;
+
+if (!username || !password) {
+  throw new Error('Smoke tests require ADMIN_USERNAME and ADMIN_PASSWORD.');
+}
+
+let managedServer = null;
+
+function healthUrl() {
+  const url = new URL(apiUrl);
+  const path = url.pathname.replace(/\/$/, '');
+  url.pathname = `${path}/health`;
+  return url.toString();
+}
+
+function canManageApiServer() {
+  const url = new URL(apiUrl);
+  return ['localhost', '127.0.0.1', '::1'].includes(url.hostname);
+}
+
+async function isApiHealthy() {
+  try {
+    const response = await fetch(healthUrl());
+    const body = await response.json().catch(() => ({}));
+    return response.ok && body.status === 'ok';
+  } catch {
+    return false;
+  }
+}
+
+async function ensureApiAvailable() {
+  if (await isApiHealthy()) return;
+  if (!canManageApiServer()) return;
+
+  const command = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const args = ['run', 'start:server'];
+  managedServer = spawn(command, args, {
+    cwd: process.cwd(),
+    stdio: 'ignore',
+    shell: process.platform === 'win32',
+    windowsHide: true,
+  });
+
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    if (await isApiHealthy()) return;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  throw new Error(`API did not become healthy at ${healthUrl()}`);
+}
+
+function stopManagedServer() {
+  if (!managedServer?.pid) return;
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/pid', String(managedServer.pid), '/t', '/f'], { stdio: 'ignore' });
+  } else {
+    managedServer.kill('SIGTERM');
+  }
+}
 
 async function request(path, options = {}) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const response = await fetch(`${apiUrl}${path}`, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(`${options.method || 'GET'} ${path} failed: ${body.error || response.statusText}`);
@@ -14,7 +81,7 @@ async function request(path, options = {}) {
 
 async function requestRaw(path, options = {}) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const response = await fetch(`${apiUrl}${path}`, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   return { response, body };
 }
@@ -251,6 +318,36 @@ async function main() {
   const teacherReviews = await request(`/teachers/${teacher.id}/reviews`, withAuth(token));
   if (!teacherReviews.length) throw new Error('Teacher review load returned no rows');
 
+  const invalidImport = await request('/imports/students/dry-run', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ sourceName: 'smoke-invalid.csv', rows: [{ studentCode: `IMP-BAD-${suffix}` }] }),
+  }));
+  if (invalidImport.status !== 'REJECTED' || invalidImport.rows?.[0]?.errors?.[0] !== 'NAME_REQUIRED') {
+    throw new Error('Student import dry-run validation failed');
+  }
+  const importHistory = await request('/imports', withAuth(token));
+  if (!importHistory.some((batch) => batch.id === invalidImport.batchId && batch.status === 'REJECTED')) {
+    throw new Error('Tenant-scoped import history failed');
+  }
+  const importCode = `IMP-${suffix}`;
+  const validImport = await request('/imports/students/dry-run', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      sourceName: 'smoke-valid.csv',
+      rows: [{ studentCode: importCode, name: `Imported Student ${suffix}`, classLevel: '10th', status: 'PROVISIONAL' }],
+    }),
+  }));
+  if (validImport.status !== 'VALIDATED' || validImport.validRows !== 1) throw new Error('Valid student import was not validated');
+  const committedImport = await request(`/imports/${validImport.batchId}/commit`, withAuth(token, { method: 'POST' }));
+  if (committedImport.status !== 'COMMITTED' || committedImport.importedRows !== 1) throw new Error('Student import commit failed');
+  const duplicateImport = await request('/imports/students/dry-run', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ sourceName: 'smoke-duplicate.csv', rows: [{ studentCode: importCode, name: 'Duplicate Student' }] }),
+  }));
+  if (!duplicateImport.rows?.[0]?.errors?.includes('STUDENT_CODE_DUPLICATE')) throw new Error('Student import duplicate detection failed');
+  const rolledBackImport = await request(`/imports/${validImport.batchId}/rollback`, withAuth(token, { method: 'POST' }));
+  if (rolledBackImport.status !== 'ROLLED_BACK' || rolledBackImport.rolledBackRows !== 1) throw new Error('Student import rollback failed');
+
   const student = await request('/students', withAuth(token, {
     method: 'POST',
     body: JSON.stringify({
@@ -289,6 +386,41 @@ async function main() {
     || String(studentMasters?.primary_batch_id || studentMasters?.primaryBatchId) !== String(batchMaster.data.id)) {
     throw new Error('Student relational academic fields were not saved');
   }
+  const guardianMissingStudent = await request('/imports/guardians/dry-run', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ sourceName: 'guardian-missing.csv', rows: [{ studentCode: `MISSING-${suffix}`, name: 'Private Missing Guardian' }] }),
+  }));
+  if (!guardianMissingStudent.rows?.[0]?.errors?.includes('STUDENT_NOT_FOUND')) throw new Error('Guardian import tenant dependency validation failed');
+  const guardianImport = await request('/imports/guardians/dry-run', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ sourceName: 'guardian-valid.csv', rows: [{ studentCode: studentMasters.student_code || studentMasters.studentCode, name: `Imported Guardian ${suffix}`, relationship: 'GUARDIAN', phone: smokePhone, isEmergencyContact: 'yes' }] }),
+  }));
+  if (guardianImport.status !== 'VALIDATED' || guardianImport.entityType !== 'GUARDIAN') throw new Error('Guardian import validation failed');
+  const guardianCommit = await request(`/imports/${guardianImport.batchId}/commit`, withAuth(token, { method: 'POST' }));
+  if (guardianCommit.status !== 'COMMITTED' || guardianCommit.importedRows !== 1) throw new Error('Guardian import commit failed');
+  const guardianRollback = await request(`/imports/${guardianImport.batchId}/rollback`, withAuth(token, { method: 'POST' }));
+  if (guardianRollback.status !== 'ROLLED_BACK' || guardianRollback.rolledBackRows !== 1) throw new Error('Guardian import rollback failed');
+  const openingCourse = `Opening Import ${suffix}`;
+  const invalidOpeningBalance = await request('/imports/fee-opening-balances/dry-run', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ sourceName: 'opening-invalid.csv', rows: [{ studentCode: studentMasters.student_code || studentMasters.studentCode, courseName: openingCourse, academicYear: '2026-27', openingBalance: 0, dueDate: '2026-07-31' }] }),
+  }));
+  if (!invalidOpeningBalance.rows?.[0]?.errors?.includes('OPENING_BALANCE_INVALID')) throw new Error('Fee opening balance amount validation failed');
+  const openingBalanceImport = await request('/imports/fee-opening-balances/dry-run', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ sourceName: 'opening-valid.csv', rows: [{ studentCode: studentMasters.student_code || studentMasters.studentCode, courseName: openingCourse, academicYear: '2026-27', openingBalance: 12500, dueDate: '2026-07-31' }] }),
+  }));
+  if (openingBalanceImport.status !== 'VALIDATED' || openingBalanceImport.totalAmount !== 12500) throw new Error('Fee opening balance preview failed');
+  const openingCommit = await request(`/imports/${openingBalanceImport.batchId}/commit`, withAuth(token, { method: 'POST' }));
+  if (openingCommit.status !== 'COMMITTED' || openingCommit.entityType !== 'FEE_OPENING_BALANCE') throw new Error('Fee opening balance commit failed');
+  const committedOpeningPlans = await request(`/student-fee-plans?studentId=${student.id}`, withAuth(token));
+  const committedOpeningPlan = committedOpeningPlans.data?.find((plan) => plan.courseName === openingCourse);
+  if (!committedOpeningPlan || Number(committedOpeningPlan.pendingAmount) !== 12500) throw new Error('Fee opening balance ledger posting failed');
+  const openingRollback = await request(`/imports/${openingBalanceImport.batchId}/rollback`, withAuth(token, { method: 'POST' }));
+  if (openingRollback.status !== 'ROLLED_BACK') throw new Error('Fee opening balance reversal failed');
+  const reversedOpeningPlans = await request(`/student-fee-plans?studentId=${student.id}`, withAuth(token));
+  const reversedOpeningPlan = reversedOpeningPlans.data?.find((plan) => plan.courseName === openingCourse);
+  if (reversedOpeningPlan?.status !== 'REVERSED' || Number(reversedOpeningPlan.pendingAmount) !== 0) throw new Error('Fee opening balance reversal did not preserve a zero-exposure ledger record');
   await request(`/batches/${batchMaster.data.id}/teachers`, withAuth(token, {
     method: 'POST',
     body: JSON.stringify({
@@ -526,7 +658,11 @@ async function main() {
   if (!Array.isArray(attendanceReports.dailyAbsent)) throw new Error('Attendance daily absent report failed');
   if (!attendanceReports.teacherWise?.length) throw new Error('Teacher-wise attendance report failed');
   if (!attendanceReports.teacherCompletion?.length) throw new Error('Teacher attendance completion report failed');
-  if (!attendanceReports.parentAlertLogs?.length) throw new Error('Attendance parent alert report failed');
+  const alertReportMonth = new Date().toISOString().slice(0, 7);
+  const parentAlertReport = alertReportMonth === '2026-06'
+    ? attendanceReports
+    : await request(`/attendance/reports?month=${alertReportMonth}`, withAuth(token));
+  if (!parentAlertReport.parentAlertLogs?.length) throw new Error('Attendance parent alert report failed');
   const attendanceCalendar = await request(`/attendance/calendar?batchId=${encodeURIComponent(batchMaster.data.id)}&month=6&year=2026`, withAuth(token));
   if (!attendanceCalendar.data?.sessions?.some((row) => String(row.id) === String(attendanceSession.id) && row.status === 'SUBMITTED')) {
     throw new Error('Attendance calendar did not include submitted session');
@@ -1583,7 +1719,12 @@ async function main() {
   console.log('Smoke tests passed');
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
-});
+ensureApiAvailable()
+  .then(() => main())
+  .catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    stopManagedServer();
+  });

@@ -1,14 +1,27 @@
-node_modules
-.DS_Store
-dist
-.env
-server/data.sqlite
-
-storage/
-
-storage/
-.env.local
-.env.*.local
 node_modules/
+.DS_Store
 dist/
 build/
+
+.env
+.env.local
+.env.*.local
+
+# Runtime databases and SQLite sidecar files
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+
+# Backups and operational readiness evidence
+storage/
+backups/
+readiness/
+
+# Browser-test output
+test-results/
+playwright-report/
+blob-report/
+.playwright/

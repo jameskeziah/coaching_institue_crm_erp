@@ -1,6 +1,8 @@
+const { AsyncLocalStorage } = require('async_hooks');
 const db = require('../db');
 
-let activeTransactionClient = null;
+const transactionContext = new AsyncLocalStorage();
+let sqliteQueue = Promise.resolve();
 
 function normalizePostgresRows(rows) {
   return rows.map((row) => {
@@ -24,58 +26,102 @@ function withReturningId(sql) {
   return `${sql} RETURNING id`;
 }
 
+function currentTransaction() {
+  return transactionContext.getStore() || null;
+}
+
+async function withSqliteLock(callback) {
+  const previous = sqliteQueue;
+  let release;
+  sqliteQueue = new Promise((resolve) => {
+    release = resolve;
+  });
+
+  await previous;
+  try {
+    return await callback();
+  } finally {
+    release();
+  }
+}
+
 async function run(sql, params = []) {
-  if (!activeTransactionClient) return db.run(sql, params);
-  const result = await activeTransactionClient.query(toPostgresSql(withReturningId(sql)), params);
-  return {
-    changes: result.rowCount,
-    lastID: result.rows?.[0]?.id,
-    rowCount: result.rowCount,
-  };
+  const context = currentTransaction();
+
+  if (context?.client) {
+    const result = await context.client.query(toPostgresSql(withReturningId(sql)), params);
+    return {
+      changes: result.rowCount,
+      lastID: result.rows?.[0]?.id,
+      rowCount: result.rowCount,
+    };
+  }
+
+  if (!db.isPostgres && !context?.inTransaction) {
+    return withSqliteLock(() => db.run(sql, params));
+  }
+
+  return db.run(sql, params);
 }
 
 async function get(sql, params = []) {
-  if (!activeTransactionClient) return db.get(sql, params);
-  const result = await activeTransactionClient.query(toPostgresSql(sql), params);
-  return normalizePostgresRows(result.rows)[0];
+  const context = currentTransaction();
+
+  if (context?.client) {
+    const result = await context.client.query(toPostgresSql(sql), params);
+    return normalizePostgresRows(result.rows)[0];
+  }
+
+  if (!db.isPostgres && !context?.inTransaction) {
+    return withSqliteLock(() => db.get(sql, params));
+  }
+
+  return db.get(sql, params);
 }
 
 async function all(sql, params = []) {
-  if (!activeTransactionClient) return db.all(sql, params);
-  const result = await activeTransactionClient.query(toPostgresSql(sql), params);
-  return normalizePostgresRows(result.rows);
+  const context = currentTransaction();
+
+  if (context?.client) {
+    const result = await context.client.query(toPostgresSql(sql), params);
+    return normalizePostgresRows(result.rows);
+  }
+
+  if (!db.isPostgres && !context?.inTransaction) {
+    return withSqliteLock(() => db.all(sql, params));
+  }
+
+  return db.all(sql, params);
 }
 
 async function transaction(callback) {
-  if (activeTransactionClient) {
-    return callback();
-  }
+  if (currentTransaction()?.inTransaction) return callback();
 
   if (!db.isPostgres) {
-    await db.run('BEGIN TRANSACTION');
-    try {
-      const result = await callback();
-      await db.run('COMMIT');
-      return result;
-    } catch (error) {
-      await db.run('ROLLBACK');
-      throw error;
-    }
+    return withSqliteLock(async () => {
+      await db.run('BEGIN TRANSACTION');
+      try {
+        const result = await transactionContext.run({ dialect: 'sqlite', inTransaction: true }, callback);
+        await db.run('COMMIT');
+        return result;
+      } catch (error) {
+        await db.run('ROLLBACK');
+        throw error;
+      }
+    });
   }
 
   const client = await db.db.connect();
-  activeTransactionClient = client;
 
   try {
     await client.query('BEGIN');
-    const result = await callback();
+    const result = await transactionContext.run({ dialect: 'postgres', client, inTransaction: true }, callback);
     await client.query('COMMIT');
     return result;
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally {
-    activeTransactionClient = null;
     client.release();
   }
 }
