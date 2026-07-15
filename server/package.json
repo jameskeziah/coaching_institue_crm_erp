@@ -14,6 +14,7 @@
     "express": "^4.18.2",
     "helmet": "^8.2.0",
     "jsonwebtoken": "^9.0.0",
+    "nodemailer": "^9.0.3",
     "pdfkit": "^0.19.1",
     "pg": "^8.21.0",
     "razorpay": "^2.9.6",

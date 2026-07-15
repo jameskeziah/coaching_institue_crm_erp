@@ -1,4 +1,13 @@
 const { get } = require('../services/db.service');
+const ACCESS_ENABLED_STATUSES = new Set(['active', 'trialing']);
+
+function isAccessEnabled(value) {
+  return ACCESS_ENABLED_STATUSES.has(String(value || '').trim().toLowerCase());
+}
+
+function hasSubscriptionAccess(value) {
+  return value === true || value === 1 || value === '1' || String(value).toLowerCase() === 'true';
+}
 
 async function requireActiveTenant(req, res, next) {
   try {
@@ -9,10 +18,17 @@ async function requireActiveTenant(req, res, next) {
     }
 
     const tenant = await get(
-      `SELECT status
+      `SELECT tenants.status,
+              EXISTS (
+                SELECT 1
+                FROM tenant_subscriptions
+                WHERE tenant_subscriptions.tenant_id = tenants.id
+                  AND tenant_subscriptions.deleted_at IS NULL
+                  AND LOWER(tenant_subscriptions.status) IN ('active', 'trialing')
+              ) AS subscription_access_enabled
        FROM tenants
-       WHERE id = ?
-       AND deleted_at IS NULL`,
+       WHERE tenants.id = ?
+       AND tenants.deleted_at IS NULL`,
       [req.user.tenantId]
     );
 
@@ -22,7 +38,7 @@ async function requireActiveTenant(req, res, next) {
       });
     }
 
-    if (!['trialing', 'active', 'Active'].includes(tenant.status)) {
+    if (!isAccessEnabled(tenant.status) || !hasSubscriptionAccess(tenant.subscription_access_enabled || tenant.subscriptionAccessEnabled)) {
       return res.status(403).json({
         message: 'Tenant access is disabled. Please contact support.',
         code: 'TENANT_ACCESS_DISABLED',

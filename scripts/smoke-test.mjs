@@ -308,6 +308,36 @@ async function main() {
   const teacherReviews = await request(`/teachers/${teacher.id}/reviews`, withAuth(token));
   if (!teacherReviews.length) throw new Error('Teacher review load returned no rows');
 
+  const invalidImport = await request('/imports/students/dry-run', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ sourceName: 'smoke-invalid.csv', rows: [{ studentCode: `IMP-BAD-${suffix}` }] }),
+  }));
+  if (invalidImport.status !== 'REJECTED' || invalidImport.rows?.[0]?.errors?.[0] !== 'NAME_REQUIRED') {
+    throw new Error('Student import dry-run validation failed');
+  }
+  const importHistory = await request('/imports', withAuth(token));
+  if (!importHistory.some((batch) => batch.id === invalidImport.batchId && batch.status === 'REJECTED')) {
+    throw new Error('Tenant-scoped import history failed');
+  }
+  const importCode = `IMP-${suffix}`;
+  const validImport = await request('/imports/students/dry-run', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({
+      sourceName: 'smoke-valid.csv',
+      rows: [{ studentCode: importCode, name: `Imported Student ${suffix}`, classLevel: '10th', status: 'PROVISIONAL' }],
+    }),
+  }));
+  if (validImport.status !== 'VALIDATED' || validImport.validRows !== 1) throw new Error('Valid student import was not validated');
+  const committedImport = await request(`/imports/${validImport.batchId}/commit`, withAuth(token, { method: 'POST' }));
+  if (committedImport.status !== 'COMMITTED' || committedImport.importedRows !== 1) throw new Error('Student import commit failed');
+  const duplicateImport = await request('/imports/students/dry-run', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ sourceName: 'smoke-duplicate.csv', rows: [{ studentCode: importCode, name: 'Duplicate Student' }] }),
+  }));
+  if (!duplicateImport.rows?.[0]?.errors?.includes('STUDENT_CODE_DUPLICATE')) throw new Error('Student import duplicate detection failed');
+  const rolledBackImport = await request(`/imports/${validImport.batchId}/rollback`, withAuth(token, { method: 'POST' }));
+  if (rolledBackImport.status !== 'ROLLED_BACK' || rolledBackImport.rolledBackRows !== 1) throw new Error('Student import rollback failed');
+
   const student = await request('/students', withAuth(token, {
     method: 'POST',
     body: JSON.stringify({
@@ -346,6 +376,41 @@ async function main() {
     || String(studentMasters?.primary_batch_id || studentMasters?.primaryBatchId) !== String(batchMaster.data.id)) {
     throw new Error('Student relational academic fields were not saved');
   }
+  const guardianMissingStudent = await request('/imports/guardians/dry-run', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ sourceName: 'guardian-missing.csv', rows: [{ studentCode: `MISSING-${suffix}`, name: 'Private Missing Guardian' }] }),
+  }));
+  if (!guardianMissingStudent.rows?.[0]?.errors?.includes('STUDENT_NOT_FOUND')) throw new Error('Guardian import tenant dependency validation failed');
+  const guardianImport = await request('/imports/guardians/dry-run', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ sourceName: 'guardian-valid.csv', rows: [{ studentCode: studentMasters.student_code || studentMasters.studentCode, name: `Imported Guardian ${suffix}`, relationship: 'GUARDIAN', phone: smokePhone, isEmergencyContact: 'yes' }] }),
+  }));
+  if (guardianImport.status !== 'VALIDATED' || guardianImport.entityType !== 'GUARDIAN') throw new Error('Guardian import validation failed');
+  const guardianCommit = await request(`/imports/${guardianImport.batchId}/commit`, withAuth(token, { method: 'POST' }));
+  if (guardianCommit.status !== 'COMMITTED' || guardianCommit.importedRows !== 1) throw new Error('Guardian import commit failed');
+  const guardianRollback = await request(`/imports/${guardianImport.batchId}/rollback`, withAuth(token, { method: 'POST' }));
+  if (guardianRollback.status !== 'ROLLED_BACK' || guardianRollback.rolledBackRows !== 1) throw new Error('Guardian import rollback failed');
+  const openingCourse = `Opening Import ${suffix}`;
+  const invalidOpeningBalance = await request('/imports/fee-opening-balances/dry-run', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ sourceName: 'opening-invalid.csv', rows: [{ studentCode: studentMasters.student_code || studentMasters.studentCode, courseName: openingCourse, academicYear: '2026-27', openingBalance: 0, dueDate: '2026-07-31' }] }),
+  }));
+  if (!invalidOpeningBalance.rows?.[0]?.errors?.includes('OPENING_BALANCE_INVALID')) throw new Error('Fee opening balance amount validation failed');
+  const openingBalanceImport = await request('/imports/fee-opening-balances/dry-run', withAuth(token, {
+    method: 'POST',
+    body: JSON.stringify({ sourceName: 'opening-valid.csv', rows: [{ studentCode: studentMasters.student_code || studentMasters.studentCode, courseName: openingCourse, academicYear: '2026-27', openingBalance: 12500, dueDate: '2026-07-31' }] }),
+  }));
+  if (openingBalanceImport.status !== 'VALIDATED' || openingBalanceImport.totalAmount !== 12500) throw new Error('Fee opening balance preview failed');
+  const openingCommit = await request(`/imports/${openingBalanceImport.batchId}/commit`, withAuth(token, { method: 'POST' }));
+  if (openingCommit.status !== 'COMMITTED' || openingCommit.entityType !== 'FEE_OPENING_BALANCE') throw new Error('Fee opening balance commit failed');
+  const committedOpeningPlans = await request(`/student-fee-plans?studentId=${student.id}`, withAuth(token));
+  const committedOpeningPlan = committedOpeningPlans.data?.find((plan) => plan.courseName === openingCourse);
+  if (!committedOpeningPlan || Number(committedOpeningPlan.pendingAmount) !== 12500) throw new Error('Fee opening balance ledger posting failed');
+  const openingRollback = await request(`/imports/${openingBalanceImport.batchId}/rollback`, withAuth(token, { method: 'POST' }));
+  if (openingRollback.status !== 'ROLLED_BACK') throw new Error('Fee opening balance reversal failed');
+  const reversedOpeningPlans = await request(`/student-fee-plans?studentId=${student.id}`, withAuth(token));
+  const reversedOpeningPlan = reversedOpeningPlans.data?.find((plan) => plan.courseName === openingCourse);
+  if (reversedOpeningPlan?.status !== 'REVERSED' || Number(reversedOpeningPlan.pendingAmount) !== 0) throw new Error('Fee opening balance reversal did not preserve a zero-exposure ledger record');
   await request(`/batches/${batchMaster.data.id}/teachers`, withAuth(token, {
     method: 'POST',
     body: JSON.stringify({

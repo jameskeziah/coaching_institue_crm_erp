@@ -57,7 +57,7 @@ async function run(sql, params = []) {
     };
   }
 
-  if (!db.isPostgres && !context) {
+  if (!db.isPostgres && !context?.inTransaction) {
     return withSqliteLock(() => db.run(sql, params));
   }
 
@@ -72,7 +72,7 @@ async function get(sql, params = []) {
     return normalizePostgresRows(result.rows)[0];
   }
 
-  if (!db.isPostgres && !context) {
+  if (!db.isPostgres && !context?.inTransaction) {
     return withSqliteLock(() => db.get(sql, params));
   }
 
@@ -87,7 +87,7 @@ async function all(sql, params = []) {
     return normalizePostgresRows(result.rows);
   }
 
-  if (!db.isPostgres && !context) {
+  if (!db.isPostgres && !context?.inTransaction) {
     return withSqliteLock(() => db.all(sql, params));
   }
 
@@ -95,14 +95,13 @@ async function all(sql, params = []) {
 }
 
 async function transaction(callback) {
-  const existingContext = currentTransaction();
-  if (existingContext) return callback();
+  if (currentTransaction()?.inTransaction) return callback();
 
   if (!db.isPostgres) {
     return withSqliteLock(async () => {
       await db.run('BEGIN TRANSACTION');
       try {
-        const result = await transactionContext.run({ dialect: 'sqlite' }, callback);
+        const result = await transactionContext.run({ dialect: 'sqlite', inTransaction: true }, callback);
         await db.run('COMMIT');
         return result;
       } catch (error) {
@@ -116,7 +115,7 @@ async function transaction(callback) {
 
   try {
     await client.query('BEGIN');
-    const result = await transactionContext.run({ dialect: 'postgres', client }, callback);
+    const result = await transactionContext.run({ dialect: 'postgres', client, inTransaction: true }, callback);
     await client.query('COMMIT');
     return result;
   } catch (error) {

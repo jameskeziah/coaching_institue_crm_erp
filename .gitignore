@@ -15,3 +15,4 @@ build/
 test-results/
 playwright-report/
 blob-report/
+server/data.before-onboarding-fix.sqlite

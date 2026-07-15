@@ -1,5 +1,5 @@
 const express = require('express');
-const { run, all, get } = require('../db');
+const { run, all, get, transaction } = require('../services/db.service');
 const authMiddleware = require('../middleware/auth');
 const { requireTenant } = require('../middleware/tenant');
 const { requireAnyRole } = require('../middleware/rbac');
@@ -7,6 +7,7 @@ const { requireVerifiedEmail } = require('../middleware/verified-email');
 const { ROLE_GROUPS, ROLES } = require('../config/roles');
 const { publicUser, userRoles } = require('../utils/request');
 const { hashPassword, validatePasswordStrength } = require('../services/password.service');
+const { createAuditLog } = require('../services/auditLog.service');
 
 const router = express.Router();
 
@@ -53,7 +54,7 @@ router.get('/', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGE
   res.json(users.map(publicUser));
 });
 
-router.post('/', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
+router.post('/', authMiddleware, requireTenant, requireVerifiedEmail, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
   const email = String(req.body.email || req.body.username || '').trim().toLowerCase();
   const username = String(req.body.username || email).trim();
   const name = String(req.body.name || username).trim();
@@ -65,31 +66,45 @@ router.post('/', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAG
     return res.status(400).json({ error: error.message });
   }
   if (!userRoles.includes(role)) return res.status(400).json({ error: 'Invalid role' });
-  if (role === ROLES.OWNER && req.user.role !== ROLES.OWNER) {
-    return res.status(403).json({ error: 'Only an owner can create another owner' });
-  }
+  if (role === ROLES.OWNER) return res.status(400).json({ error: 'Owner creation requires the dedicated owner recovery or transfer workflow' });
 
-  const existing = await get(`SELECT * FROM users WHERE (username = ? OR email = ?) AND deleted_at IS NULL`, [username, email]);
-  if (existing) return res.status(400).json({ error: 'User already exists' });
-
-  const hashed = await hashPassword(password);
   const tenantId = req.user.tenant_id || req.user.tenantId;
-  const result = await run(
-    `INSERT INTO users
-      (username, name, email, password, password_hash, role, tenant_id, is_active, created_by, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-    [username, name, email, hashed, hashed, role, tenantId || null, req.user.id || null]
-  );
-  const user = await get(
-    `SELECT users.id, users.username, users.name, users.email, users.role, users.tenant_id, users.email_verified_at,
-            tenants.name AS tenantName, tenants.subscriptionPlan, tenants.subscriptionStatus
-     FROM users
-     LEFT JOIN tenants ON tenants.id = users.tenant_id
-     WHERE users.id = ?`,
-    [result.lastID]
-  );
+  try {
+    const hashed = await hashPassword(password);
+    const user = await transaction(async () => {
+      const existing = await get(`SELECT id FROM users WHERE username = ? OR LOWER(email) = ?`, [username, email]);
+      if (existing) throw Object.assign(new Error('User already exists'), { status: 409 });
 
-  res.json(publicUser(user));
+      const result = await run(
+        `INSERT INTO users
+          (username, name, email, password, password_hash, role, tenant_id, is_active, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [username, name, email, hashed, hashed, role, tenantId || null, req.user.id || null]
+      );
+      const createdUser = await get(
+        `SELECT users.id, users.username, users.name, users.email, users.role, users.tenant_id, users.email_verified_at,
+                tenants.name AS tenantName, tenants.subscriptionPlan, tenants.subscriptionStatus
+         FROM users
+         LEFT JOIN tenants ON tenants.id = users.tenant_id
+         WHERE users.id = ?
+           AND users.tenant_id = ?
+           AND users.deleted_at IS NULL`,
+        [result.lastID, tenantId]
+      );
+
+      await createAuditLog({
+        tenantId, actorUserId: req.user.id, action: 'USER_CREATED', entityType: 'user', entityId: result.lastID,
+        newValues: { role: createdUser.role, email: createdUser.email, active: true },
+      });
+      return createdUser;
+    });
+
+    return res.json(publicUser(user));
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    if (/UNIQUE|constraint/i.test(error.message || '')) return res.status(409).json({ error: 'User already exists' });
+    return res.status(500).json({ error: 'Failed to create user' });
+  }
 });
 
 async function updateUserRole(req, res) {
@@ -106,43 +121,56 @@ async function updateUserRole(req, res) {
     ROLES.USER,
   ];
 
-  if (req.user.role === ROLES.OWNER) allowedRoles.unshift(ROLES.OWNER);
-
   if (!allowedRoles.includes(role)) return res.status(400).json({ error: 'Invalid role' });
   if (String(id) === String(req.user.id)) return res.status(400).json({ error: 'You cannot change your own role' });
 
-  const existing = await get(`SELECT * FROM users WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`, [id, tenantId]);
-  if (!existing) return res.status(404).json({ error: 'User not found' });
+  try {
+    const user = await transaction(async () => {
+      const existing = await get(`SELECT id, role FROM users WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`, [id, tenantId]);
+      if (!existing) throw Object.assign(new Error('User not found'), { status: 404 });
 
-  if (existing.role === ROLES.OWNER && role !== ROLES.OWNER) {
-    const ownerCount = await get(
-      `SELECT COUNT(*) AS count
-       FROM users
-       WHERE tenant_id = ? AND role = ? AND deleted_at IS NULL`,
-      [tenantId, ROLES.OWNER]
-    );
-    if (Number(ownerCount?.count || 0) <= 1) {
-      return res.status(400).json({ error: 'Cannot remove the last owner' });
-    }
+      if (existing.role === ROLES.OWNER && role !== ROLES.OWNER) {
+        const ownerCount = await get(
+          `SELECT COUNT(*) AS count
+           FROM users
+           WHERE tenant_id = ?
+             AND role = ?
+             AND deleted_at IS NULL`,
+          [tenantId, ROLES.OWNER]
+        );
+        if (Number(ownerCount?.count || 0) <= 1) {
+          throw Object.assign(new Error('Cannot remove the last owner'), { status: 400 });
+        }
+      }
+
+      await run(
+        `UPDATE users
+         SET role = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
+        [role, id, tenantId]
+      );
+      const updatedUser = await get(
+        `SELECT users.id, users.username, users.name, users.email, users.role, users.tenant_id, users.email_verified_at,
+                tenants.name AS tenantName, tenants.subscriptionPlan, tenants.subscriptionStatus
+         FROM users
+         LEFT JOIN tenants ON tenants.id = users.tenant_id
+         WHERE users.id = ? AND users.tenant_id = ? AND users.deleted_at IS NULL`,
+        [id, tenantId]
+      );
+      if (!updatedUser) throw Object.assign(new Error('User not found'), { status: 404 });
+
+      await createAuditLog({
+        tenantId, actorUserId: req.user.id, action: 'USER_ROLE_CHANGED', entityType: 'user', entityId: id,
+        oldValues: { role: existing.role }, newValues: { role: updatedUser.role },
+      });
+      return updatedUser;
+    });
+
+    return res.json(publicUser(user));
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    return res.status(500).json({ error: 'Failed to update user role' });
   }
-
-  await run(
-    `UPDATE users
-     SET role = ?, updated_at = CURRENT_TIMESTAMP
-     WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
-    [role, id, tenantId]
-  );
-  const user = await get(
-    `SELECT users.id, users.username, users.name, users.email, users.role, users.tenant_id, users.email_verified_at,
-            tenants.name AS tenantName, tenants.subscriptionPlan, tenants.subscriptionStatus
-     FROM users
-     LEFT JOIN tenants ON tenants.id = users.tenant_id
-     WHERE users.id = ? AND users.tenant_id = ? AND users.deleted_at IS NULL`,
-    [id, tenantId]
-  );
-  if (!user) return res.status(404).json({ error: 'User not found' });
-
-  return res.json(publicUser(user));
 }
 
 router.patch('/:id/role', authMiddleware, requireTenant, requireVerifiedEmail, requireAnyRole(ROLE_GROUPS.MANAGEMENT), updateUserRole);

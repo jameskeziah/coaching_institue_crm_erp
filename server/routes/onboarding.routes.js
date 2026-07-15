@@ -1,10 +1,11 @@
 const express = require('express');
 const { createTenantOnboarding } = require('../services/tenant-onboarding.service');
+const { isMailDeliveryError } = require('../services/mail.service');
 const auth = require('../middleware/auth');
 const { requireTenant } = require('../middleware/tenant');
 const { requireAnyRole } = require('../middleware/rbac');
 const { ROLE_GROUPS } = require('../config/roles');
-const { run, get, all, transaction } = require('../services/db.service');
+const { run, get, all } = require('../services/db.service');
 
 const router = express.Router();
 
@@ -12,40 +13,21 @@ router.post('/institute', async (req, res) => {
   try {
     const result = await createTenantOnboarding(req.body);
 
-    await transaction(async () => {
-      await run(
-        `UPDATE tenants
-         SET status = 'pending_verification',
-             subscriptionStatus = 'pending_verification',
-             updatedAt = CURRENT_TIMESTAMP,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = ? AND deleted_at IS NULL`,
-        [result.tenant.id]
-      );
-      await run(
-        `UPDATE tenant_subscriptions
-         SET status = 'pending_verification',
-             trial_started_at = NULL,
-             trial_ends_at = NULL,
-             current_period_start = NULL,
-             current_period_end = NULL,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE tenant_id = ? AND deleted_at IS NULL`,
-        [result.tenant.id]
-      );
-    });
-
     return res.status(201).json({
-      message: 'Institute created. Verify the owner email to activate the trial.',
-      data: {
-        ...result,
-        tenant: {
-          ...result.tenant,
-          status: 'pending_verification',
-        },
-      },
+      message: result.deliveryStatus === 'sent'
+        ? 'Institute created. Verification email sent.'
+        : 'Institute created. Verification email queued.',
+      data: result,
     });
   } catch (error) {
+    if (isMailDeliveryError(error)) {
+      return res.status(503).json({
+        message:
+          'The institute was created in pending verification, but the verification email could not be delivered. Please try again or request a resend.',
+        code: error.code,
+      });
+    }
+
     return res.status(400).json({
       message: error.message || 'Failed to onboard institute',
     });

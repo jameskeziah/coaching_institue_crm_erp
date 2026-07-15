@@ -13,8 +13,8 @@ const {
   onboardingRateLimit,
   publicEnquiryRateLimit,
 } = require('./middleware/rate-limit');
+const { processDueEmailOutboxRecords } = require('./services/email-outbox.service');
 
-const emailVerificationRoutes = require('./routes/email-verification.routes');
 const authRoutes = require('./routes/auth.routes');
 const usersRoutes = require('./routes/users.routes');
 const invitesRoutes = require('./routes/invites.routes');
@@ -27,6 +27,7 @@ const leadManagementRoutes = require('./routes/leadManagement.routes');
 const sourceAnalyticsRoutes = require('./routes/sourceAnalytics.routes');
 const publicEnquiryRoutes = require('./routes/publicEnquiry.routes');
 const studentsRoutes = require('./routes/students.routes');
+const importsRoutes = require('./routes/imports.routes');
 const feeStructuresRoutes = require('./routes/feeStructures.routes');
 const academicMasterRoutes = require('./routes/academicMaster.routes');
 const attendanceOperationsRoutes = require('./routes/attendanceOperations.routes');
@@ -43,6 +44,31 @@ const legacyRoutes = require('./routes/legacy.routes');
 
 const app = express();
 const allowedOrigins = new Set(env.CORS_ORIGINS);
+let emailOutboxWorkerInterval = null;
+
+function startEmailOutboxWorker() {
+  if (!env.EMAIL_OUTBOX_WORKER_ENABLED) return;
+
+  const workerId = `api-${process.pid}`;
+  const runWorker = async () => {
+    try {
+      await processDueEmailOutboxRecords({
+        limit: env.EMAIL_OUTBOX_WORKER_LIMIT,
+        workerId,
+        staleAfterMs: env.EMAIL_OUTBOX_STALE_LOCK_MS,
+      });
+    } catch (error) {
+      console.warn('Email outbox worker failed', {
+        message: error.message,
+        code: error.code,
+      });
+    }
+  };
+
+  emailOutboxWorkerInterval = setInterval(runWorker, env.EMAIL_OUTBOX_WORKER_INTERVAL_MS);
+  if (typeof emailOutboxWorkerInterval.unref === 'function') emailOutboxWorkerInterval.unref();
+  setTimeout(runWorker, 0).unref?.();
+}
 
 if (env.TRUST_PROXY) app.set('trust proxy', 1);
 app.disable('x-powered-by');
@@ -68,7 +94,9 @@ app.post('/api/auth/login', loginRateLimit);
 app.post('/api/platform-auth/login', platformLoginRateLimit);
 app.post('/api/auth/forgot-password', passwordResetRateLimit);
 app.post('/api/auth/reset-password', passwordResetRateLimit);
-app.post('/api/auth/resend-trial-verification', passwordResetRateLimit);
+app.post('/api/auth/verify-email', passwordResetRateLimit);
+app.post('/api/auth/resend-verification-request', passwordResetRateLimit);
+app.post('/api/auth/resend-verification', passwordResetRateLimit);
 app.post('/api/onboarding/institute', onboardingRateLimit);
 app.post('/api/public/enquiries', publicEnquiryRateLimit);
 
@@ -80,7 +108,6 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-app.use('/api/auth', emailVerificationRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/invites', invitesRoutes);
@@ -93,6 +120,7 @@ app.use('/api', leadManagementRoutes);
 app.use('/api', sourceAnalyticsRoutes);
 app.use('/api', publicEnquiryRoutes);
 app.use('/api/students', authMiddleware, requireTenant, studentDataAccess, studentsRoutes);
+app.use('/api/imports', importsRoutes);
 app.use('/api', feeStructuresRoutes);
 app.use('/api', academicMasterRoutes);
 app.use('/api', attendanceOperationsRoutes);
@@ -127,5 +155,6 @@ app.use((error, req, res, next) => {
   await migrate();
   app.listen(env.PORT, () => {
     console.log(`Server listening on http://localhost:${env.PORT}`);
+    startEmailOutboxWorker();
   });
 })();
