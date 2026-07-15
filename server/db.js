@@ -639,8 +639,11 @@ async function createTables() {
       token_hash TEXT NOT NULL,
       expires_at TEXT NOT NULL,
       used_at TEXT,
+      superseded_at TEXT,
+      superseded_by_token_id TEXT,
       revoked_at TEXT,
       revoke_reason TEXT,
+      revocation_reason TEXT,
       delivery_status TEXT DEFAULT 'pending',
       delivery_attempt_count INTEGER DEFAULT 0,
       delivery_last_attempt_at TEXT,
@@ -694,12 +697,35 @@ async function createTables() {
   );
 
   await run(
+    `CREATE TABLE IF NOT EXISTS tenant_owner_recovery_requests (
+      id TEXT PRIMARY KEY,
+      tenant_id ${integerType} NOT NULL,
+      email TEXT NOT NULL,
+      token_hash TEXT NOT NULL,
+      platform_admin_id TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      accepted_at TEXT,
+      revoked_at TEXT,
+      delivery_status TEXT DEFAULT 'pending',
+      delivery_attempt_count INTEGER DEFAULT 0,
+      delivery_last_attempt_at TEXT,
+      delivery_sent_at TEXT,
+      delivery_provider_message_id TEXT,
+      delivery_last_error_code TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )`
+  );
+
+  await run(
     `CREATE TABLE IF NOT EXISTS email_outbox (
       id TEXT PRIMARY KEY,
       tenant_id ${integerType},
       user_id ${integerType},
       token_id TEXT,
       invite_id TEXT,
+      owner_recovery_request_id TEXT,
       type TEXT NOT NULL,
       recipient TEXT NOT NULL,
       payload TEXT,
@@ -1498,6 +1524,44 @@ async function createTables() {
       FOREIGN KEY(tenant_id) REFERENCES tenants(id)
     )`
   );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS data_import_batches (
+      id TEXT PRIMARY KEY,
+      tenant_id ${integerType} NOT NULL,
+      entity_type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      source_name TEXT,
+      payload_sha256 TEXT NOT NULL,
+      total_rows ${integerType} NOT NULL DEFAULT 0,
+      valid_rows ${integerType} NOT NULL DEFAULT 0,
+      invalid_rows ${integerType} NOT NULL DEFAULT 0,
+      created_by ${integerType},
+      created_at TEXT NOT NULL,
+      committed_at TEXT,
+      rolled_back_at TEXT,
+      FOREIGN KEY(tenant_id) REFERENCES tenants(id)
+    )`
+  );
+
+  await run(
+    `CREATE TABLE IF NOT EXISTS data_import_rows (
+      id TEXT PRIMARY KEY,
+      batch_id TEXT NOT NULL,
+      tenant_id ${integerType} NOT NULL,
+      row_number ${integerType} NOT NULL,
+      status TEXT NOT NULL,
+      normalized_data TEXT,
+      errors TEXT,
+      entity_id TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(batch_id) REFERENCES data_import_batches(id),
+      FOREIGN KEY(tenant_id) REFERENCES tenants(id)
+    )`
+  );
+
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_import_rows_batch_number ON data_import_rows (batch_id, row_number)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_import_batches_tenant_status ON data_import_batches (tenant_id, status, created_at)`);
 
   await run(
     `CREATE TABLE IF NOT EXISTS student_history (
@@ -2547,6 +2611,34 @@ async function migrateStudentProfiles() {
   }
   await addColumnIfMissing('student_history', 'tenant_id', 'INTEGER');
   await addColumnIfMissing('follow_up_tasks', 'tenant_id', 'INTEGER');
+  await addColumnIfMissing('follow_up_tasks', 'risk_reason', 'TEXT');
+  await addColumnIfMissing('follow_up_tasks', 'assigned_to_user_id', 'TEXT');
+  await addColumnIfMissing('follow_up_tasks', 'task_category', "TEXT DEFAULT 'OPERATIONAL'");
+  await addColumnIfMissing('follow_up_tasks', 'visibility_scope', "TEXT DEFAULT 'MANAGEMENT'");
+  await run(
+    `UPDATE follow_up_tasks
+     SET task_category = CASE
+       WHEN UPPER(COALESCE(task_category, '')) IN ('ACADEMIC', 'COUNSELLING', 'ATTENDANCE', 'FINANCIAL', 'GUARDIAN_COMMUNICATION', 'OPERATIONAL')
+         THEN UPPER(task_category)
+       WHEN UPPER(COALESCE(taskType, '')) LIKE '%ACADEMIC%' THEN 'ACADEMIC'
+       WHEN UPPER(COALESCE(taskType, '')) LIKE '%ATTENDANCE%' OR risk_reason IS NOT NULL THEN 'ATTENDANCE'
+       WHEN UPPER(COALESCE(taskType, '')) LIKE '%FEE%' OR UPPER(COALESCE(taskType, '')) LIKE '%PAYMENT%' OR UPPER(COALESCE(linkedType, '')) LIKE '%FEE%' THEN 'FINANCIAL'
+       WHEN UPPER(COALESCE(taskType, '')) LIKE '%PARENT%' OR UPPER(COALESCE(taskType, '')) LIKE '%GUARDIAN%' THEN 'GUARDIAN_COMMUNICATION'
+       WHEN UPPER(COALESCE(taskType, '')) LIKE '%COUNSELL%' OR UPPER(COALESCE(linkedType, '')) LIKE '%ADMISSION%' THEN 'COUNSELLING'
+       ELSE 'OPERATIONAL'
+     END
+     WHERE task_category IS NULL
+        OR UPPER(COALESCE(task_category, '')) NOT IN ('ACADEMIC', 'COUNSELLING', 'ATTENDANCE', 'FINANCIAL', 'GUARDIAN_COMMUNICATION', 'OPERATIONAL')`
+  );
+  await run(
+    `UPDATE follow_up_tasks
+     SET visibility_scope = COALESCE(visibility_scope, CASE
+       WHEN task_category IN ('ACADEMIC', 'ATTENDANCE') THEN 'TEACHER'
+       WHEN task_category = 'COUNSELLING' THEN 'COUNSELLOR'
+       ELSE 'MANAGEMENT'
+     END)`
+  );
+  await addColumnIfMissing('teachers', 'user_id', 'TEXT');
 
   await run(
     `CREATE TABLE IF NOT EXISTS student_guardians (
@@ -2620,6 +2712,8 @@ async function migrateStudentProfiles() {
   await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_student_guardians_primary ON student_guardians (tenant_id, student_id) WHERE is_primary = 1`);
   await run(`CREATE INDEX IF NOT EXISTS idx_student_documents_student ON student_documents (tenant_id, student_id, archived_at, created_at)`);
   await run(`CREATE INDEX IF NOT EXISTS idx_communication_events_student ON communication_events (tenant_id, student_id, created_at)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_follow_up_tasks_access ON follow_up_tasks (tenant_id, student_id, task_category, assigned_to_user_id, status, dueDate)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_teachers_user ON teachers (tenant_id, user_id)`);
 
   const tenants = await all(`SELECT id FROM tenants`);
   for (const tenant of tenants) {
@@ -3421,11 +3515,74 @@ async function migrateAuthColumns() {
     await addColumnIfMissing(table, 'delivery_provider_message_id', 'TEXT');
     await addColumnIfMissing(table, 'delivery_last_error_code', 'TEXT');
   }
+  await addColumnIfMissing('email_outbox', 'owner_recovery_request_id', 'TEXT');
+  await run(`UPDATE users SET role = 'owner' WHERE LOWER(role) = 'owner' AND role != 'owner'`);
+  const duplicateOwners = await all(
+    `SELECT tenant_id, COUNT(*) AS owner_count
+     FROM users
+     WHERE role = 'owner'
+       AND deleted_at IS NULL
+     GROUP BY tenant_id
+     HAVING COUNT(*) > 1`
+  );
+  if (duplicateOwners.length > 0) {
+    const tenantIds = duplicateOwners.map((row) => row.tenant_id).join(', ');
+    throw new Error(`Owner invariant migration blocked: multiple non-deleted owners exist for tenant IDs ${tenantIds}. Resolve owner transfer records before restarting.`);
+  }
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_single_owner_per_tenant ON users (tenant_id) WHERE role = 'owner' AND deleted_at IS NULL`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_owner_recovery_token ON tenant_owner_recovery_requests (token_hash)`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_owner_recovery_tenant ON tenant_owner_recovery_requests (tenant_id, accepted_at, revoked_at)`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_recovery_one_pending_per_tenant ON tenant_owner_recovery_requests (tenant_id) WHERE accepted_at IS NULL AND revoked_at IS NULL`);
 
   for (const table of ['email_verification_tokens', 'password_reset_tokens']) {
     await addColumnIfMissing(table, 'revoked_at', 'TEXT');
     await addColumnIfMissing(table, 'revoke_reason', 'TEXT');
+    await addColumnIfMissing(table, 'revocation_reason', 'TEXT');
   }
+
+  await addColumnIfMissing('email_verification_tokens', 'superseded_at', 'TEXT');
+  await addColumnIfMissing('email_verification_tokens', 'superseded_by_token_id', 'TEXT');
+
+  await run(
+    `UPDATE email_verification_tokens
+     SET revocation_reason = COALESCE(revocation_reason, revoke_reason)
+     WHERE revocation_reason IS NULL
+       AND revoke_reason IS NOT NULL`
+  );
+
+  await run(
+    `UPDATE password_reset_tokens
+     SET revocation_reason = COALESCE(revocation_reason, revoke_reason)
+     WHERE revocation_reason IS NULL
+       AND revoke_reason IS NOT NULL`
+  );
+
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_email_verification_tokens_hash ON email_verification_tokens (token_hash)`);
+  await run(
+    `CREATE INDEX IF NOT EXISTS idx_email_verification_tokens_active
+     ON email_verification_tokens (user_id, used_at, superseded_at, revoked_at, expires_at)`
+  );
+  await run(
+    `CREATE INDEX IF NOT EXISTS idx_email_verification_tokens_user_created
+     ON email_verification_tokens (user_id, tenant_id, created_at)`
+  );
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_password_reset_tokens_hash ON password_reset_tokens (token_hash)`);
+  await run(
+    `CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_active
+     ON password_reset_tokens (user_id, used_at, revoked_at, expires_at)`
+  );
+
+  await run(
+    `CREATE INDEX IF NOT EXISTS idx_email_outbox_user_type
+     ON email_outbox (user_id, type, status, created_at)`
+  );
+  await run(
+    `CREATE INDEX IF NOT EXISTS idx_email_outbox_verification_token_active
+     ON email_outbox (token_id, status)
+     WHERE token_id IS NOT NULL
+       AND type IN ('owner_email_verification', 'user_email_verification')
+       AND status IN ('pending', 'retry', 'processing')`
+  );
 
   await run(`UPDATE users SET email = COALESCE(email, username) WHERE email IS NULL`);
   await run(`UPDATE users SET name = COALESCE(name, username) WHERE name IS NULL`);

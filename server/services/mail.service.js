@@ -198,11 +198,23 @@ function createMailService({
     });
   }
 
+  async function sendOwnerRecoveryEmail({ email, token, instituteName, expiresAt }) {
+    const inviteUrl = `${config.APP_URL}/accept-owner-recovery?token=${token}`;
+    const instituteText = instituteName ? ` for ${instituteName}` : '';
+    const expiryText = expiresAt ? ` This link expires at ${expiresAt}.` : '';
+    return sendEmail({
+      to: email,
+      subject: 'Complete institute owner recovery',
+      text: `Complete owner recovery${instituteText} using this link: ${inviteUrl}.${expiryText}`,
+    });
+  }
+
   return {
     sendEmail,
     sendPasswordResetEmail,
     sendVerificationEmail,
     sendInviteEmail,
+    sendOwnerRecoveryEmail,
   };
 }
 

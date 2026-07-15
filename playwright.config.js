@@ -15,7 +15,7 @@ export default defineConfig({
       command: 'npm run start:server',
       url: 'http://127.0.0.1:4000/api',
       reuseExistingServer: true,
-      timeout: 20_000,
+      timeout: 60_000,
     },
     {
       command: 'npm run dev -- --host 127.0.0.1 --port 5173',

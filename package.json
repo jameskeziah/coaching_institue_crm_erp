@@ -20,8 +20,18 @@
     "audit:onboarding-lifecycle": "node scripts/audit-onboarding-lifecycle.mjs",
     "email:outbox:process": "node scripts/process-email-outbox.mjs",
     "test:mail": "node --test server/tests/mail.service.integration.test.js server/tests/email-outbox.lifecycle.test.js",
+    "test:authz": "node --test server/tests/student-followups.authorization.test.js",
+    "check:tenant": "node scripts/check-tenant-enforcement.mjs",
+    "backup:sqlite": "node scripts/sqlite-data-safety.mjs backup",
+    "restore:verify:sqlite": "node scripts/sqlite-data-safety.mjs verify-restore",
+    "backup:postgres": "node scripts/postgres-data-safety.mjs backup",
+    "restore:verify:postgres": "node scripts/postgres-data-safety.mjs verify-restore",
+    "restore:provision-and-verify:postgres": "node scripts/postgres-data-safety.mjs provision-and-verify",
+    "test:data-safety": "node scripts/sqlite-data-safety.mjs self-test && node scripts/postgres-data-safety.mjs self-test",
     "test:smoke": "node scripts/smoke-test.mjs",
-    "test:ui": "playwright test"
+    "test:ui": "playwright test",
+    "pilot:readiness": "node scripts/pilot-readiness.mjs",
+    "verify": "node scripts/verify.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.16",

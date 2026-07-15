@@ -90,6 +90,32 @@ test('verification email is sent through an injected mail transport', async () =
   ]);
 });
 
+test('owner recovery email identifies the institute and expiry', async () => {
+  const deliveredMessages = [];
+  const mailService = createMailService({
+    config: productionConfig,
+    logger: silentLogger,
+    transport: {
+      async sendMail(message) {
+        deliveredMessages.push(message);
+        return { messageId: 'owner-recovery-message', accepted: [message.to], rejected: [] };
+      },
+    },
+  });
+
+  await mailService.sendOwnerRecoveryEmail({
+    email: 'owner@example.test',
+    token: 'owner-recovery-token',
+    instituteName: 'Example Institute',
+    expiresAt: '2026-07-15T12:00:00.000Z',
+  });
+
+  assert.equal(deliveredMessages[0].subject, 'Complete institute owner recovery');
+  assert.match(deliveredMessages[0].text, /Example Institute/);
+  assert.match(deliveredMessages[0].text, /2026-07-15T12:00:00\.000Z/);
+  assert.match(deliveredMessages[0].text, /accept-owner-recovery\?token=owner-recovery-token/);
+});
+
 test('mail delivery throws when SMTP does not accept the recipient', async () => {
   const mailService = createMailService({
     config: productionConfig,

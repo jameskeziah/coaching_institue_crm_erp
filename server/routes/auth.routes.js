@@ -23,14 +23,38 @@ const {
   createEmailOutboxRecord,
   processEmailOutboxRecord,
 } = require('../services/email-outbox.service');
+const { createAuditLog } = require('../services/auditLog.service');
 
 const router = express.Router();
 const ACCESS_ENABLED_STATUSES = new Set(['active', 'trialing']);
+const VERIFICATION_EMAIL_TYPES = ['owner_email_verification', 'user_email_verification'];
+const RESEND_COOLDOWN_MS = 60_000;
+const RESEND_RATE_WINDOW_MS = 15 * 60_000;
+const MAX_USER_RESENDS_PER_WINDOW = 5;
+const MAX_IP_RESENDS_PER_WINDOW = 20;
+const MAX_PENDING_VERIFICATION_OUTBOX = 3;
+const GENERIC_INVITE_ROLES = new Set(['admin', 'accountant', 'counsellor', 'teacher', 'user']);
+const resendUserBuckets = new Map();
+const resendIpBuckets = new Map();
 
 class InvalidVerificationTokenError extends Error {
   constructor(message = 'Invalid or expired verification token') {
     super(message);
     this.name = 'InvalidVerificationTokenError';
+  }
+}
+
+class EmailAlreadyVerifiedResult extends Error {
+  constructor() {
+    super('Email is already verified');
+    this.name = 'EmailAlreadyVerifiedResult';
+  }
+}
+
+class ResendRateLimitError extends Error {
+  constructor(message = 'Please wait before requesting another verification email') {
+    super(message);
+    this.name = 'ResendRateLimitError';
   }
 }
 
@@ -70,6 +94,30 @@ function addDaysIso(startIso, days) {
   return date.toISOString();
 }
 
+function toSqlTimestamp(date = new Date()) {
+  return date.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+function pruneBucket(bucket, now = Date.now()) {
+  while (bucket.length > 0 && now - bucket[0] > RESEND_RATE_WINDOW_MS) bucket.shift();
+}
+
+function recordRateLimitAttempt(map, key, limit) {
+  if (!key) return;
+  const now = Date.now();
+  const bucket = map.get(key) || [];
+  pruneBucket(bucket, now);
+  if (bucket.length >= limit) {
+    throw new ResendRateLimitError();
+  }
+  bucket.push(now);
+  map.set(key, bucket);
+}
+
+function requestIp(req) {
+  return req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown';
+}
+
 function userPasswordHash(user) {
   return user?.password_hash || user?.password;
 }
@@ -105,17 +153,6 @@ async function createVerificationToken(user) {
     : 'user_email_verification';
 
   await run(
-    `UPDATE email_verification_tokens
-     SET revoked_at = CURRENT_TIMESTAMP,
-         revoke_reason = 'superseded'
-     WHERE user_id = ?
-       AND tenant_id = ?
-       AND used_at IS NULL
-       AND revoked_at IS NULL`,
-    [user.id, user.tenant_id || user.tenantId]
-  );
-
-  await run(
     `INSERT INTO email_verification_tokens
       (id, user_id, tenant_id, token_hash, expires_at, delivery_status, delivery_attempt_count)
      VALUES (?, ?, ?, ?, ?, 'pending', 0)`,
@@ -138,6 +175,66 @@ async function createVerificationToken(user) {
   });
 
   return { id: tokenId, outboxId };
+}
+
+async function queueVerificationResend(user, { ip } = {}) {
+  recordRateLimitAttempt(resendUserBuckets, String(user.id), MAX_USER_RESENDS_PER_WINDOW);
+  recordRateLimitAttempt(resendIpBuckets, String(ip || 'unknown'), MAX_IP_RESENDS_PER_WINDOW);
+
+  const cooldownCutoff = toSqlTimestamp(new Date(Date.now() - RESEND_COOLDOWN_MS));
+  const recentQueued = await get(
+    `SELECT id
+     FROM email_outbox
+     WHERE user_id = ?
+       AND tenant_id = ?
+       AND type IN (?, ?)
+       AND status IN ('pending', 'retry', 'processing')
+       AND REPLACE(created_at, 'T', ' ') >= ?
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [
+      user.id,
+      user.tenant_id || user.tenantId,
+      VERIFICATION_EMAIL_TYPES[0],
+      VERIFICATION_EMAIL_TYPES[1],
+      cooldownCutoff,
+    ]
+  );
+
+  if (recentQueued) {
+    return {
+      outboxId: recentQueued.id,
+      deduplicated: true,
+      deliveryStatus: 'queued',
+    };
+  }
+
+  const pendingCount = await get(
+    `SELECT COUNT(*) AS count
+     FROM email_outbox
+     WHERE user_id = ?
+       AND tenant_id = ?
+       AND type IN (?, ?)
+       AND status IN ('pending', 'retry', 'processing')`,
+    [
+      user.id,
+      user.tenant_id || user.tenantId,
+      VERIFICATION_EMAIL_TYPES[0],
+      VERIFICATION_EMAIL_TYPES[1],
+    ]
+  );
+
+  if (Number(pendingCount?.count || 0) >= MAX_PENDING_VERIFICATION_OUTBOX) {
+    throw new ResendRateLimitError('Too many verification emails are already queued');
+  }
+
+  const token = await transaction(async () => createVerificationToken(user));
+  return {
+    tokenId: token.id,
+    outboxId: token.outboxId,
+    deduplicated: false,
+    deliveryStatus: 'queued',
+  };
 }
 
 function genericPasswordResetResponse(res) {
@@ -554,36 +651,8 @@ router.post('/verify-email', async (req, res) => {
     const trialStartedAt = new Date().toISOString();
     const trialEndsAt = addDaysIso(trialStartedAt, env.TRIAL_DAYS || 14);
 
-    await transaction(async () => {
+    const outcome = await transaction(async () => {
       const verificationToken = await get(
-        `SELECT id
-         FROM email_verification_tokens
-         WHERE token_hash = ?
-           AND used_at IS NULL
-           AND revoked_at IS NULL
-           AND expires_at > ?`,
-        [tokenHash, trialStartedAt]
-      );
-
-      if (!verificationToken) {
-        throw new InvalidVerificationTokenError();
-      }
-
-      const claimed = await run(
-        `UPDATE email_verification_tokens
-         SET used_at = CURRENT_TIMESTAMP
-         WHERE id = ?
-           AND used_at IS NULL
-           AND revoked_at IS NULL
-           AND expires_at > ?`,
-        [verificationToken.id, trialStartedAt]
-      );
-
-      if (!changedOne(claimed)) {
-        throw new InvalidVerificationTokenError('Verification token has already been used or expired');
-      }
-
-      const detail = await get(
         `SELECT tokens.*,
                 users.role,
                 users.email_verified_at,
@@ -597,12 +666,51 @@ router.post('/verify-email', async (req, res) => {
          JOIN tenants
            ON tenants.id = tokens.tenant_id
           AND tenants.deleted_at IS NULL
-         WHERE tokens.id = ?`,
-        [verificationToken.id]
+         WHERE tokens.token_hash = ?`,
+        [tokenHash]
       );
 
-      if (!detail) {
+      if (!verificationToken) {
         throw new InvalidVerificationTokenError();
+      }
+
+      if (verificationToken.email_verified_at) {
+        return { alreadyVerified: true };
+      }
+
+      if (
+        verificationToken.used_at ||
+        verificationToken.superseded_at ||
+        verificationToken.revoked_at ||
+        new Date(verificationToken.expires_at).getTime() <= Date.now()
+      ) {
+        throw new InvalidVerificationTokenError();
+      }
+
+      const claimed = await run(
+        `UPDATE email_verification_tokens
+         SET used_at = CURRENT_TIMESTAMP
+         WHERE id = ?
+           AND used_at IS NULL
+           AND superseded_at IS NULL
+           AND revoked_at IS NULL
+           AND expires_at > ?`,
+        [verificationToken.id, trialStartedAt]
+      );
+
+      if (!changedOne(claimed)) {
+        const verifiedUser = await get(
+          `SELECT email_verified_at
+           FROM users
+           WHERE id = ?
+             AND tenant_id = ?
+             AND deleted_at IS NULL`,
+          [verificationToken.user_id, verificationToken.tenant_id]
+        );
+        if (verifiedUser?.email_verified_at || verifiedUser?.emailVerifiedAt) {
+          return { alreadyVerified: true };
+        }
+        throw new InvalidVerificationTokenError('Verification token has already been used or expired');
       }
 
       const userUpdate = await run(
@@ -612,19 +720,54 @@ router.post('/verify-email', async (req, res) => {
          WHERE id = ?
            AND tenant_id = ?
            AND deleted_at IS NULL`,
-        [detail.user_id, detail.tenant_id]
+        [verificationToken.user_id, verificationToken.tenant_id]
       );
 
       if (!changedOne(userUpdate)) {
         throw new Error('Failed to verify user email');
       }
 
+      await run(
+        `UPDATE email_verification_tokens
+         SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP),
+             revoke_reason = COALESCE(revoke_reason, 'verified_with_other_token'),
+             revocation_reason = COALESCE(revocation_reason, 'verified_with_other_token')
+         WHERE user_id = ?
+           AND tenant_id = ?
+           AND id != ?
+           AND used_at IS NULL
+           AND revoked_at IS NULL`,
+        [verificationToken.user_id, verificationToken.tenant_id, verificationToken.id]
+      );
+
+      await run(
+        `UPDATE email_outbox
+         SET status = 'cancelled',
+             payload = NULL,
+             locked_at = NULL,
+             locked_by = NULL,
+             last_error_code = 'USER_ALREADY_VERIFIED',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE user_id = ?
+           AND tenant_id = ?
+           AND type IN (?, ?)
+           AND token_id != ?
+           AND status IN ('pending', 'retry')`,
+        [
+          verificationToken.user_id,
+          verificationToken.tenant_id,
+          VERIFICATION_EMAIL_TYPES[0],
+          VERIFICATION_EMAIL_TYPES[1],
+          verificationToken.id,
+        ]
+      );
+
       const activatesPendingOwner =
-        detail.role === 'owner' &&
-        normalizeStatus(detail.tenant_status) === 'pending_verification';
+        verificationToken.role === 'owner' &&
+        normalizeStatus(verificationToken.tenant_status) === 'pending_verification';
 
       if (!activatesPendingOwner) {
-        return;
+        return { verified: true };
       }
 
       const tenantUpdate = await run(
@@ -636,7 +779,7 @@ router.post('/verify-email', async (req, res) => {
          WHERE id = ?
            AND status = 'pending_verification'
            AND deleted_at IS NULL`,
-        [detail.tenant_id]
+        [verificationToken.tenant_id]
       );
 
       if (!changedOne(tenantUpdate)) {
@@ -659,19 +802,33 @@ router.post('/verify-email', async (req, res) => {
           trialEndsAt,
           trialStartedAt,
           trialEndsAt,
-          detail.tenant_id,
+          verificationToken.tenant_id,
         ]
       );
 
       if (!changedOne(subscriptionUpdate)) {
         throw new Error('Failed to activate pending subscription');
       }
+
+      return { verified: true };
     });
+
+    if (outcome?.alreadyVerified) {
+      return res.json({
+        message: 'Email is already verified',
+      });
+    }
 
     return res.json({
       message: 'Email verified successfully',
     });
   } catch (error) {
+    if (error instanceof EmailAlreadyVerifiedResult) {
+      return res.json({
+        message: 'Email is already verified',
+      });
+    }
+
     if (error instanceof InvalidVerificationTokenError) {
       return res.status(400).json({
         message: error.message,
@@ -717,12 +874,8 @@ router.post('/resend-verification-request', async (req, res) => {
 
     if (!user) return res.json(response);
 
-    const token = await transaction(async () => createVerificationToken(user));
-    await sendVerificationTokenEmail({ token }).catch((error) => {
-      if (isMailDeliveryError(error)) {
-        console.warn('Public verification resend delivery failed', { code: error.code });
-        return;
-      }
+    await queueVerificationResend(user, { ip: requestIp(req) }).catch((error) => {
+      if (error instanceof ResendRateLimitError) return null;
       throw error;
     });
 
@@ -734,15 +887,36 @@ router.post('/resend-verification-request', async (req, res) => {
 
 router.post('/resend-verification', authMiddleware, requireTenant, async (req, res) => {
   try {
-    const user = await get(`SELECT * FROM users WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`, [req.user.id, req.user.tenantId]);
+    const user = await get(
+      `SELECT users.*,
+              tenants.status AS tenant_status,
+              tenants.subscriptionStatus AS tenant_subscription_status
+       FROM users
+       JOIN tenants ON tenants.id = users.tenant_id
+       WHERE users.id = ?
+         AND users.tenant_id = ?
+         AND users.deleted_at IS NULL
+         AND tenants.deleted_at IS NULL`,
+      [req.user.id, req.user.tenantId]
+    );
     if (!user) return res.status(404).json({ message: 'User not found' });
     if (user.email_verified_at) return res.json({ message: 'Email is already verified' });
 
-    const token = await transaction(async () => createVerificationToken(user));
-    await sendVerificationTokenEmail({ token });
+    const queued = await queueVerificationResend(user, { ip: requestIp(req) });
 
-    return res.json({ message: 'Verification email sent' });
+    return res.json({
+      message: 'Verification email queued',
+      deliveryStatus: queued.deliveryStatus,
+      deduplicated: queued.deduplicated,
+    });
   } catch (error) {
+    if (error instanceof ResendRateLimitError) {
+      return res.status(429).json({
+        message: error.message,
+        code: 'VERIFICATION_RESEND_RATE_LIMITED',
+      });
+    }
+
     if (isMailDeliveryError(error)) {
       return res.status(503).json({
         message:
@@ -773,78 +947,156 @@ router.post('/accept-invite', async (req, res) => {
   }
 
   try {
-    const invite = await get(
-      `SELECT *
-       FROM user_invites
-       WHERE token_hash = ?
-       AND accepted_at IS NULL
-       AND revoked_at IS NULL
-       AND expires_at > ?`,
-      [hashToken(token), new Date().toISOString()]
-    );
+    await transaction(async () => {
+      const now = new Date().toISOString();
+      const invite = await get(
+        `SELECT *
+         FROM user_invites
+         WHERE token_hash = ?
+           AND accepted_at IS NULL
+           AND revoked_at IS NULL
+           AND expires_at > ?`,
+        [hashToken(token), now]
+      );
+      if (!invite) throw Object.assign(new Error('Invalid or expired invite'), { status: 400 });
+      if (!GENERIC_INVITE_ROLES.has(invite.role)) {
+        throw Object.assign(new Error('This invite role requires a dedicated access workflow'), { status: 409 });
+      }
 
-    if (!invite) {
-      return res.status(400).json({
-        message: 'Invalid or expired invite',
+      const email = normalizeEmail(invite.email);
+      const existing = await get(
+        `SELECT id FROM users WHERE LOWER(email) = ? OR LOWER(username) = ?`,
+        [email, email]
+      );
+      if (existing) throw Object.assign(new Error('User already exists'), { status: 409 });
+
+      const claimed = await run(
+        `UPDATE user_invites
+         SET accepted_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?
+           AND accepted_at IS NULL
+           AND revoked_at IS NULL
+           AND expires_at > ?`,
+        [invite.id, now]
+      );
+      if (!changedOne(claimed)) throw Object.assign(new Error('Invite was already used or revoked'), { status: 409 });
+
+      const passwordHash = await hashPassword(password);
+      const createdUser = await run(
+        `INSERT INTO users
+         (username, tenant_id, name, email, password, password_hash, role, email_verified_at,
+          is_active, created_by, created_at, updated_at, deleted_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)`,
+        [email, invite.tenant_id, String(name).trim(), email, passwordHash, passwordHash, invite.role, invite.invited_by]
+      );
+
+      await createAuditLog({
+        tenantId: invite.tenant_id,
+        actorUserId: createdUser.lastID,
+        action: 'USER_INVITE_ACCEPTED',
+        entityType: 'user',
+        entityId: createdUser.lastID,
+        newValues: { role: invite.role, emailVerified: true, active: true },
+        metadata: { inviteId: invite.id, invitedBy: invite.invited_by },
       });
-    }
-
-    const existing = await get(
-      `SELECT * FROM users WHERE tenant_id = ? AND LOWER(email) = ? AND deleted_at IS NULL`,
-      [invite.tenant_id, normalizeEmail(invite.email)]
-    );
-    if (existing) return res.status(400).json({ message: 'User already exists' });
-
-    const passwordHash = await hashPassword(password);
-    await run(
-      `INSERT INTO users
-       (
-         username,
-         tenant_id,
-         name,
-         email,
-         password,
-         password_hash,
-         role,
-         email_verified_at,
-         is_active,
-         created_by,
-         created_at,
-         updated_at,
-         deleted_at
-       )
-       VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)`,
-      [
-        normalizeEmail(invite.email),
-        invite.tenant_id,
-        String(name).trim(),
-        normalizeEmail(invite.email),
-        passwordHash,
-        passwordHash,
-        invite.role,
-        invite.invited_by,
-      ]
-    );
-
-    await run(
-      `UPDATE user_invites
-       SET accepted_at = CURRENT_TIMESTAMP,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-      [invite.id]
-    );
-
-    return res.status(201).json({
-      message: 'Invite accepted successfully. You can now log in.',
     });
+
+    return res.status(201).json({ message: 'Invite accepted successfully. You can now log in.' });
   } catch (error) {
-    return res.status(500).json({
-      message: 'Failed to accept invite',
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    if (/UNIQUE|constraint/i.test(error.message || '')) return res.status(409).json({ message: 'User already exists' });
+    return res.status(500).json({ message: 'Failed to accept invite' });
+  }
+});
+
+router.post('/accept-owner-recovery', async (req, res) => {
+  const { token, name, password } = req.body;
+  if (!token || !String(name || '').trim() || !password) return res.status(400).json({ message: 'Token, name, and password are required' });
+  try {
+    validatePasswordStrength(password);
+  } catch (error) {
+    return res.status(400).json({ message: error.message });
+  }
+
+  try {
+    await transaction(async () => {
+      const recovery = await get(
+        `SELECT recovery.*
+         FROM tenant_owner_recovery_requests recovery
+         JOIN platform_admins admin
+           ON admin.id = recovery.platform_admin_id
+          AND admin.is_active = 1
+          AND admin.deleted_at IS NULL
+         WHERE recovery.token_hash = ?
+           AND recovery.accepted_at IS NULL
+           AND recovery.revoked_at IS NULL
+           AND recovery.expires_at > ?`,
+        [hashToken(token), new Date().toISOString()]
+      );
+      if (!recovery) throw Object.assign(new Error('Invalid or expired owner recovery link'), { status: 400 });
+      const tenant = await get(`SELECT id FROM tenants WHERE id = ? AND deleted_at IS NULL`, [recovery.tenant_id]);
+      if (!tenant) throw Object.assign(new Error('Institute is no longer available'), { status: 409 });
+      const owner = await get(`SELECT id FROM users WHERE tenant_id = ? AND role = 'owner' AND deleted_at IS NULL`, [recovery.tenant_id]);
+      if (owner) throw Object.assign(new Error('Institute owner has already been established'), { status: 409 });
+      const email = normalizeEmail(recovery.email);
+      const existingUser = await get(`SELECT id FROM users WHERE LOWER(email) = ? OR LOWER(username) = ?`, [email, email]);
+      if (existingUser) throw Object.assign(new Error('The invited email already belongs to a user'), { status: 409 });
+
+      const claimed = await run(
+        `UPDATE tenant_owner_recovery_requests SET accepted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND accepted_at IS NULL AND revoked_at IS NULL`,
+        [recovery.id]
+      );
+      if (Number(claimed.changes ?? claimed.rowCount ?? 0) !== 1) throw Object.assign(new Error('Owner recovery link was already used'), { status: 409 });
+      const passwordHash = await hashPassword(password);
+      const result = await run(
+        `INSERT INTO users
+          (username, tenant_id, name, email, password, password_hash, role, email_verified_at,
+           is_active, created_by, created_at, updated_at, deleted_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'owner', CURRENT_TIMESTAMP, 1, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)`,
+        [email, recovery.tenant_id, String(name).trim(), email, passwordHash, passwordHash]
+      );
+      await run(
+        `UPDATE email_outbox SET status = 'cancelled', payload = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE owner_recovery_request_id IN (
+           SELECT id FROM tenant_owner_recovery_requests WHERE tenant_id = ? AND id != ? AND accepted_at IS NULL AND revoked_at IS NULL
+         ) AND status IN ('pending', 'retry', 'processing')`,
+        [recovery.tenant_id, recovery.id]
+      );
+      await run(`UPDATE tenant_owner_recovery_requests SET revoked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND id != ? AND accepted_at IS NULL AND revoked_at IS NULL`, [recovery.tenant_id, recovery.id]);
+      await createAuditLog({
+        tenantId: recovery.tenant_id, actorUserId: result.lastID, action: 'TENANT_OWNER_RECOVERY_ACCEPTED',
+        entityType: 'user', entityId: result.lastID,
+        newValues: { role: 'owner', emailVerified: true, active: true },
+        metadata: { recoveryRequestId: recovery.id, ipAddress: req.ip || null, userAgent: req.headers['user-agent'] || null },
+      });
+      await run(
+        `INSERT INTO platform_audit_logs
+          (id, platform_admin_id, action, target_type, target_id, metadata, ip_address, user_agent, created_at)
+         VALUES (?, ?, 'TENANT_OWNER_RECOVERY_ACCEPTED', 'tenant', ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+        [
+          generateId('pal'),
+          recovery.platform_admin_id,
+          String(recovery.tenant_id),
+          JSON.stringify({ recoveryRequestId: recovery.id, ownerUserId: result.lastID }),
+          req.ip || null,
+          req.headers['user-agent'] || null,
+        ]
+      );
     });
+    return res.status(201).json({ message: 'Owner recovery completed. Institute access follows its current status.' });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    if (/UNIQUE|constraint/i.test(error.message || '')) return res.status(409).json({ message: 'Institute owner has already been established' });
+    return res.status(500).json({ message: 'Failed to complete owner recovery' });
   }
 });
 
 router.post('/bootstrap-tenant-admin', async (req, res) => {
+  if (env.NODE_ENV !== 'development' && env.NODE_ENV !== 'test') {
+    return res.status(404).json({ message: 'Not found' });
+  }
   const {
     bootstrapSecret,
     tenantId,

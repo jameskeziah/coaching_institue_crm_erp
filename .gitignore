@@ -12,3 +12,5 @@ storage/
 node_modules/
 dist/
 build/
+
+server/data.before-onboarding-fix.sqlite

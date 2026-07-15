@@ -42,6 +42,13 @@ async function createRoleUser(request, role) {
 test('admin can login, view dashboard, toggle theme, and logout', async ({ page }) => {
   await loginThroughUi(page);
 
+  await page.getByRole('link', { name: 'Students', exact: true }).click();
+  await page.getByRole('link', { name: 'Import CSV' }).click();
+  await expect(page.getByRole('heading', { name: 'Student & Guardian Import Center' })).toBeVisible();
+  await expect(page.getByText('No records are written until a validated batch is explicitly committed.')).toBeVisible();
+  await expect(page.getByRole('option', { name: 'Guardians' })).toHaveCount(1);
+  await expect(page.getByRole('option', { name: 'Fee opening balances' })).toHaveCount(1);
+
   await page.getByRole('button', { name: 'Toggle theme' }).click();
   await page.getByRole('menuitem', { name: /Dark/ }).click();
   await expect(page.locator('html')).toHaveClass(/dark/);
@@ -69,4 +76,23 @@ test('teacher role only sees teacher-allowed modules in the sidebar', async ({ p
   await expect(page.getByRole('link', { name: 'Reports' })).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'Admissions' })).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'Ontology' })).toHaveCount(0);
+});
+
+test('email verification link submits its token and shows success', async ({ page }) => {
+  let submittedBody;
+  await page.route('**/api/auth/verify-email', async (route) => {
+    submittedBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: 'Email verified successfully' }),
+    });
+  });
+
+  await page.goto('/verify-email?token=ui-verification-token');
+
+  await expect(page.getByRole('heading', { name: 'Verify your email' })).toBeVisible();
+  await expect(page.getByText('Email verified successfully')).toBeVisible();
+  expect(submittedBody).toEqual({ token: 'ui-verification-token' });
+  await expect(page.getByRole('link', { name: 'Continue to sign in' })).toBeVisible();
 });

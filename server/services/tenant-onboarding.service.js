@@ -252,17 +252,6 @@ async function createBranch({ tenant, input, owner }) {
 }
 
 async function createVerificationTokenForOwner(owner) {
-  await run(
-    `UPDATE email_verification_tokens
-     SET revoked_at = CURRENT_TIMESTAMP,
-         revoke_reason = 'superseded'
-     WHERE user_id = ?
-       AND tenant_id = ?
-       AND used_at IS NULL
-       AND revoked_at IS NULL`,
-    [owner.id, owner.tenant_id || owner.tenantId]
-  );
-
   const rawToken = generateRawToken();
   const tokenId = generateId('evt');
 

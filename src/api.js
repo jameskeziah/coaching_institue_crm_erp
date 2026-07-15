@@ -112,6 +112,18 @@ export function onboardInstitute(payload) {
   return request('/onboarding/institute', { method: 'POST', body: JSON.stringify(payload) });
 }
 
+export function acceptInvite(payload) {
+  return request('/auth/accept-invite', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function acceptOwnerRecovery(payload) {
+  return request('/auth/accept-owner-recovery', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+export function verifyEmail(token) {
+  return request('/auth/verify-email', { method: 'POST', body: JSON.stringify({ token }) });
+}
+
 async function platformRequest(path, options = {}) {
   const headers = options.headers || {};
   headers['Content-Type'] = 'application/json';
@@ -155,6 +167,19 @@ export function updatePlatformTenantStatus(tenantId, status) {
   return platformRequest(`/super-admin/institutes/${tenantId}/status`, {
     method: 'PATCH',
     body: JSON.stringify({ status }),
+  });
+}
+
+export function invitePlatformTenantOwner(tenantId, email, reason) {
+  return platformRequest(`/super-admin/institutes/${tenantId}/owner-invite`, {
+    method: 'POST',
+    body: JSON.stringify({ email, reason }),
+  });
+}
+
+export function revokePlatformTenantOwnerInvite(tenantId, requestId) {
+  return platformRequest(`/super-admin/institutes/${tenantId}/owner-invite/${requestId}`, {
+    method: 'DELETE',
   });
 }
 
@@ -282,6 +307,24 @@ export function submitPublicEnquiry(payload) {
 
 export function fetchStudents() {
   return request('/students');
+}
+export function fetchImportBatches() {
+  return request('/imports');
+}
+export function dryRunStudentImport(payload) {
+  return request('/imports/students/dry-run', { method: 'POST', body: JSON.stringify(payload) });
+}
+export function dryRunGuardianImport(payload) {
+  return request('/imports/guardians/dry-run', { method: 'POST', body: JSON.stringify(payload) });
+}
+export function dryRunFeeOpeningBalanceImport(payload) {
+  return request('/imports/fee-opening-balances/dry-run', { method: 'POST', body: JSON.stringify(payload) });
+}
+export function commitImportBatch(batchId) {
+  return request(`/imports/${batchId}/commit`, { method: 'POST' });
+}
+export function rollbackImportBatch(batchId) {
+  return request(`/imports/${batchId}/rollback`, { method: 'POST' });
 }
 export function createStudent(payload) {
   return request('/students', { method: 'POST', body: JSON.stringify(payload) });

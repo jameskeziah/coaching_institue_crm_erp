@@ -57,6 +57,11 @@ const envSchema = z.object({
     .regex(/^\d+$/, 'INVITE_TOKEN_DAYS must be a number')
     .transform(Number)
     .default('7'),
+  OWNER_RECOVERY_TOKEN_HOURS: z
+    .string()
+    .regex(/^\d+$/, 'OWNER_RECOVERY_TOKEN_HOURS must be a number')
+    .transform(Number)
+    .default('24'),
   TRIAL_DAYS: z
     .string()
     .regex(/^\d+$/, 'TRIAL_DAYS must be a number')
