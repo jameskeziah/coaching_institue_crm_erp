@@ -131,6 +131,31 @@ function currentTenantId(req) {
   return req.user?.tenant_id || req.user?.tenantId || null;
 }
 
+const FOLLOWUP_MANAGEMENT_ROLES = new Set(ROLE_GROUPS.MANAGEMENT);
+const FOLLOWUP_ACCESS_ROLES = [...ROLE_GROUPS.MANAGEMENT, ROLES.COUNSELLOR, ROLES.TEACHER];
+const FOLLOWUP_CATEGORIES = new Set(['ACADEMIC', 'COUNSELLING', 'ATTENDANCE', 'FINANCIAL', 'GUARDIAN_COMMUNICATION', 'OPERATIONAL']);
+
+function roleOf(req) {
+  return String(req.user?.role || '');
+}
+
+function normalizeFollowupCategory(value, fallback = 'OPERATIONAL') {
+  const normalized = String(value || '').trim().toUpperCase();
+  return FOLLOWUP_CATEGORIES.has(normalized) ? normalized : fallback;
+}
+
+function inferFollowupCategory(input = {}) {
+  const explicit = normalizeFollowupCategory(input.taskCategory || input.task_category || input.category, null);
+  if (explicit) return explicit;
+  const text = `${input.taskType || ''} ${input.linkedType || ''}`.toUpperCase();
+  if (text.includes('ACADEMIC')) return 'ACADEMIC';
+  if (text.includes('ATTENDANCE')) return 'ATTENDANCE';
+  if (text.includes('FEE') || text.includes('PAYMENT')) return 'FINANCIAL';
+  if (text.includes('PARENT') || text.includes('GUARDIAN')) return 'GUARDIAN_COMMUNICATION';
+  if (text.includes('COUNSELL')) return 'COUNSELLING';
+  return 'OPERATIONAL';
+}
+
 // Auth: Register
 router.post('/api/auth/register', async (req, res) => {
   if (!ALLOW_REGISTRATION) return res.status(403).json({ error: 'Registration is disabled' });
@@ -290,14 +315,15 @@ router.get('/api/teacher-work-controls', authMiddleware, requireTenant, async (r
   const rows = await all(
     `SELECT teacher_work_controls.*, teachers.name AS teacherName, teachers.subject AS teacherSubject
      FROM teacher_work_controls
-     INNER JOIN teachers ON teachers.id = teacher_work_controls.teacher_id
+     INNER JOIN teachers ON teachers.id = teacher_work_controls.teacher_id AND teachers.tenant_id = ?
      ORDER BY teacher_work_controls.updatedAt DESC, teacher_work_controls.id DESC`
+    , [currentTenantId(req)]
   );
   res.json(rows);
 });
 
 router.get('/api/teachers/:id/work-controls', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM teacher_work_controls WHERE teacher_id = ? ORDER BY updatedAt DESC, id DESC`, [req.params.id]);
+  const rows = await all(`SELECT teacher_work_controls.* FROM teacher_work_controls INNER JOIN teachers ON teachers.id = teacher_work_controls.teacher_id WHERE teacher_work_controls.teacher_id = ? AND teachers.tenant_id = ? ORDER BY teacher_work_controls.updatedAt DESC, teacher_work_controls.id DESC`, [req.params.id, currentTenantId(req)]);
   res.json(rows);
 });
 
@@ -305,7 +331,7 @@ router.post('/api/teacher-work-controls', authMiddleware, requireTenant, async (
   const { teacher_id, controlType, title, plannedValue, actualValue, status = 'Open', dueDate, evidenceUrl, remarks } = req.body;
   const validationError = requireFields(req.body, ['teacher_id', 'controlType', 'title']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const teacher = await get(`SELECT * FROM teachers WHERE id = ?`, [teacher_id]);
+  const teacher = await get(`SELECT * FROM teachers WHERE id = ? AND tenant_id = ?`, [teacher_id, currentTenantId(req)]);
   if (!teacher) return res.status(404).json({ error: 'Teacher not found' });
   const now = new Date().toISOString();
   const result = await run(
@@ -320,7 +346,7 @@ router.put('/api/teacher-work-controls/:id', authMiddleware, requireTenant, asyn
   const { controlType, title, plannedValue, actualValue, status = 'Open', dueDate, evidenceUrl, remarks } = req.body;
   const validationError = requireFields(req.body, ['controlType', 'title']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const existing = await get(`SELECT * FROM teacher_work_controls WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT teacher_work_controls.* FROM teacher_work_controls INNER JOIN teachers ON teachers.id = teacher_work_controls.teacher_id WHERE teacher_work_controls.id = ? AND teachers.tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'Work control not found' });
   const now = new Date().toISOString();
   await run(
@@ -331,6 +357,8 @@ router.put('/api/teacher-work-controls/:id', authMiddleware, requireTenant, asyn
 });
 
 router.delete('/api/teacher-work-controls/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
+  const existing = await get(`SELECT teacher_work_controls.id FROM teacher_work_controls INNER JOIN teachers ON teachers.id = teacher_work_controls.teacher_id WHERE teacher_work_controls.id = ? AND teachers.tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Work control not found' });
   await run(`DELETE FROM teacher_work_controls WHERE id = ?`, [req.params.id]);
   res.json({ ok: true });
 });
@@ -339,14 +367,15 @@ router.get('/api/teacher-management-actions', authMiddleware, requireTenant, asy
   const rows = await all(
     `SELECT teacher_management_actions.*, teachers.name AS teacherName, teachers.subject AS teacherSubject
      FROM teacher_management_actions
-     INNER JOIN teachers ON teachers.id = teacher_management_actions.teacher_id
+     INNER JOIN teachers ON teachers.id = teacher_management_actions.teacher_id AND teachers.tenant_id = ?
      ORDER BY teacher_management_actions.updatedAt DESC, teacher_management_actions.id DESC`
+    , [currentTenantId(req)]
   );
   res.json(rows);
 });
 
 router.get('/api/teachers/:id/management-actions', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM teacher_management_actions WHERE teacher_id = ? ORDER BY updatedAt DESC, id DESC`, [req.params.id]);
+  const rows = await all(`SELECT teacher_management_actions.* FROM teacher_management_actions INNER JOIN teachers ON teachers.id = teacher_management_actions.teacher_id WHERE teacher_management_actions.teacher_id = ? AND teachers.tenant_id = ? ORDER BY teacher_management_actions.updatedAt DESC, teacher_management_actions.id DESC`, [req.params.id, currentTenantId(req)]);
   res.json(rows);
 });
 
@@ -354,7 +383,7 @@ router.post('/api/teacher-management-actions', authMiddleware, requireTenant, as
   const { teacher_id, month, actionType, warningLevel, reason, decision, salaryDecision, status = 'Open' } = req.body;
   const validationError = requireFields(req.body, ['teacher_id', 'actionType', 'reason']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const teacher = await get(`SELECT * FROM teachers WHERE id = ?`, [teacher_id]);
+  const teacher = await get(`SELECT * FROM teachers WHERE id = ? AND tenant_id = ?`, [teacher_id, currentTenantId(req)]);
   if (!teacher) return res.status(404).json({ error: 'Teacher not found' });
   const now = new Date().toISOString();
   const result = await run(
@@ -369,7 +398,7 @@ router.put('/api/teacher-management-actions/:id', authMiddleware, requireTenant,
   const { month, actionType, warningLevel, reason, decision, salaryDecision, status = 'Open' } = req.body;
   const validationError = requireFields(req.body, ['actionType', 'reason']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const existing = await get(`SELECT * FROM teacher_management_actions WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT teacher_management_actions.* FROM teacher_management_actions INNER JOIN teachers ON teachers.id = teacher_management_actions.teacher_id WHERE teacher_management_actions.id = ? AND teachers.tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'Management action not found' });
   const now = new Date().toISOString();
   await run(
@@ -380,6 +409,8 @@ router.put('/api/teacher-management-actions/:id', authMiddleware, requireTenant,
 });
 
 router.delete('/api/teacher-management-actions/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
+  const existing = await get(`SELECT teacher_management_actions.id FROM teacher_management_actions INNER JOIN teachers ON teachers.id = teacher_management_actions.teacher_id WHERE teacher_management_actions.id = ? AND teachers.tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Management action not found' });
   await run(`DELETE FROM teacher_management_actions WHERE id = ?`, [req.params.id]);
   res.json({ ok: true });
 });
@@ -399,8 +430,9 @@ router.get('/api/teacher-reviews', authMiddleware, requireTenant, async (req, re
       teachers.name AS teacherName,
       teachers.subject AS teacherSubject
     FROM teacher_reviews
-    INNER JOIN teachers ON teachers.id = teacher_reviews.teacher_id
+    INNER JOIN teachers ON teachers.id = teacher_reviews.teacher_id AND teachers.tenant_id = ?
     ORDER BY teacher_reviews.updatedAt DESC, teacher_reviews.id DESC`
+    , [currentTenantId(req)]
   );
   res.json(rows.map(normalizeReview));
 });
@@ -414,9 +446,9 @@ router.get('/api/teachers/:id/reviews', authMiddleware, requireTenant, async (re
       teachers.subject AS teacherSubject
     FROM teacher_reviews
     INNER JOIN teachers ON teachers.id = teacher_reviews.teacher_id
-    WHERE teacher_reviews.teacher_id = ?
+    WHERE teacher_reviews.teacher_id = ? AND teachers.tenant_id = ?
     ORDER BY teacher_reviews.updatedAt DESC, teacher_reviews.id DESC`,
-    [id]
+    [id, currentTenantId(req)]
   );
   res.json(rows.map(normalizeReview));
 });
@@ -425,7 +457,7 @@ router.post('/api/teacher-reviews', authMiddleware, requireTenant, async (req, r
   const { teacher_id, month, scores } = req.body;
   if (!teacher_id || !month) return res.status(400).json({ error: 'Missing teacher_id or month' });
 
-  const teacher = await get(`SELECT * FROM teachers WHERE id = ?`, [teacher_id]);
+  const teacher = await get(`SELECT * FROM teachers WHERE id = ? AND tenant_id = ?`, [teacher_id, currentTenantId(req)]);
   if (!teacher) return res.status(404).json({ error: 'Teacher not found' });
 
   const now = new Date().toISOString();
@@ -449,7 +481,7 @@ router.put('/api/teacher-reviews/:id', authMiddleware, requireTenant, async (req
   const { month, scores } = req.body;
   if (!month) return res.status(400).json({ error: 'Missing month' });
 
-  const existing = await get(`SELECT * FROM teacher_reviews WHERE id = ?`, [id]);
+  const existing = await get(`SELECT teacher_reviews.* FROM teacher_reviews INNER JOIN teachers ON teachers.id = teacher_reviews.teacher_id WHERE teacher_reviews.id = ? AND teachers.tenant_id = ?`, [id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'Review not found' });
 
   const now = new Date().toISOString();
@@ -463,6 +495,8 @@ router.put('/api/teacher-reviews/:id', authMiddleware, requireTenant, async (req
 
 router.delete('/api/teacher-reviews/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
   const { id } = req.params;
+  const existing = await get(`SELECT teacher_reviews.id FROM teacher_reviews INNER JOIN teachers ON teachers.id = teacher_reviews.teacher_id WHERE teacher_reviews.id = ? AND teachers.tenant_id = ?`, [id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Review not found' });
   await run(`DELETE FROM teacher_reviews WHERE id = ?`, [id]);
   res.json({ ok: true });
 });
@@ -546,16 +580,18 @@ router.put('/api/student-history/:id', authMiddleware, requireTenant, async (req
   const { type, title, detail, eventDate } = req.body;
   const validationError = requireFields(req.body, ['type', 'title']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const existing = await get(`SELECT * FROM student_history WHERE id = ?`, [id]);
+  const existing = await get(`SELECT * FROM student_history WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'History record not found' });
-  await run(`UPDATE student_history SET type = ?, title = ?, detail = ?, eventDate = ? WHERE id = ?`, [type, title, detail, eventDate, id]);
-  const row = await get(`SELECT * FROM student_history WHERE id = ?`, [id]);
+  await run(`UPDATE student_history SET type = ?, title = ?, detail = ?, eventDate = ? WHERE id = ? AND tenant_id = ?`, [type, title, detail, eventDate, id, currentTenantId(req)]);
+  const row = await get(`SELECT * FROM student_history WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
   res.json(row);
 });
 
 router.delete('/api/student-history/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
   const { id } = req.params;
-  await run(`DELETE FROM student_history WHERE id = ?`, [id]);
+  const existing = await get(`SELECT id FROM student_history WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'History record not found' });
+  await run(`DELETE FROM student_history WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -583,21 +619,114 @@ function followUpOrderSql() {
     follow_up_tasks.id DESC`;
 }
 
-async function getFollowUpTask(id) {
+function followUpSelectSql() {
+  return `SELECT
+    follow_up_tasks.id,
+    follow_up_tasks.tenant_id,
+    follow_up_tasks.student_id,
+    COALESCE(students.name, follow_up_tasks.studentName) AS studentName,
+    follow_up_tasks.taskType,
+    follow_up_tasks.dueDate,
+    follow_up_tasks.priority,
+    follow_up_tasks.assignedTo,
+    follow_up_tasks.assigned_to_user_id,
+    follow_up_tasks.task_category,
+    follow_up_tasks.visibility_scope,
+    follow_up_tasks.status,
+    follow_up_tasks.notes,
+    follow_up_tasks.linkedType,
+    follow_up_tasks.linkedId,
+    follow_up_tasks.createdBy,
+    follow_up_tasks.completionOutcome,
+    follow_up_tasks.completedAt,
+    follow_up_tasks.completedBy,
+    follow_up_tasks.createdAt,
+    follow_up_tasks.updatedAt`;
+}
+
+function restrictedFollowUpDto(row) {
+  const normalized = normalizeFollowUpTask(row);
+  return {
+    id: normalized.id,
+    studentId: normalized.student_id,
+    studentName: normalized.studentName,
+    action: normalized.taskType,
+    type: normalized.taskType,
+    dueDate: normalized.dueDate,
+    priority: normalized.priority,
+    status: normalized.status,
+  };
+}
+
+function followUpDtoForRole(row, role) {
+  return FOLLOWUP_MANAGEMENT_ROLES.has(role) ? normalizeFollowUpTask(row) : restrictedFollowUpDto(row);
+}
+
+function appendFollowUpAccessScope(req, where, params) {
+  const role = roleOf(req);
+  if (FOLLOWUP_MANAGEMENT_ROLES.has(role)) return;
+
+  if (role === ROLES.COUNSELLOR) {
+    where.push("follow_up_tasks.task_category = 'COUNSELLING'");
+    where.push('CAST(follow_up_tasks.assigned_to_user_id AS TEXT) = CAST(? AS TEXT)');
+    params.push(req.user.id);
+    return;
+  }
+
+  if (role === ROLES.TEACHER) {
+    where.push("follow_up_tasks.task_category = 'ACADEMIC'");
+    where.push(
+      `EXISTS (
+        SELECT 1
+        FROM batch_students bs
+        JOIN batch_teachers bt
+          ON bt.tenant_id = bs.tenant_id
+         AND bt.batch_id = bs.batch_id
+         AND bt.status = 'ACTIVE'
+        JOIN teachers t
+          ON CAST(t.id AS TEXT) = CAST(bt.teacher_id AS TEXT)
+         AND CAST(t.tenant_id AS TEXT) = CAST(bt.tenant_id AS TEXT)
+         AND CAST(t.user_id AS TEXT) = CAST(? AS TEXT)
+        WHERE CAST(bs.tenant_id AS TEXT) = CAST(follow_up_tasks.tenant_id AS TEXT)
+          AND CAST(bs.student_id AS TEXT) = CAST(follow_up_tasks.student_id AS TEXT)
+          AND bs.status = 'ACTIVE'
+      )`
+    );
+    params.push(req.user.id);
+    return;
+  }
+
+  where.push('1 = 0');
+}
+
+function canMutateFollowUp(req, task) {
+  const role = roleOf(req);
+  if (FOLLOWUP_MANAGEMENT_ROLES.has(role)) return true;
+  if (role === ROLES.COUNSELLOR) {
+    return task.task_category === 'COUNSELLING' && String(task.assigned_to_user_id || '') === String(req.user.id);
+  }
+  if (role === ROLES.TEACHER) {
+    return task.task_category === 'ACADEMIC' && String(task.assigned_to_user_id || '') === String(req.user.id);
+  }
+  return false;
+}
+
+async function getFollowUpTask(id, tenantId) {
   const row = await get(
-    `SELECT follow_up_tasks.*, COALESCE(students.name, follow_up_tasks.studentName) AS studentName
+    `${followUpSelectSql()}
      FROM follow_up_tasks
-     LEFT JOIN students ON students.id = follow_up_tasks.student_id
-     WHERE follow_up_tasks.id = ?`,
-    [id]
+     LEFT JOIN students ON students.id = follow_up_tasks.student_id AND students.tenant_id = follow_up_tasks.tenant_id
+     WHERE follow_up_tasks.id = ?
+       AND follow_up_tasks.tenant_id = ?`,
+    [id, tenantId]
   );
   return normalizeFollowUpTask(row);
 }
 
-router.get('/api/follow-ups', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.STAFF), async (req, res) => {
+router.get('/api/follow-ups', authMiddleware, requireTenant, requireAnyRole(FOLLOWUP_ACCESS_ROLES), async (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
-  const where = [];
-  const params = [];
+  const where = ['follow_up_tasks.tenant_id = ?'];
+  const params = [currentTenantId(req)];
   const { student_id, status, date, from, to, assignedTo } = req.query;
 
   if (student_id) {
@@ -629,19 +758,20 @@ router.get('/api/follow-ups', authMiddleware, requireTenant, requireAnyRole(ROLE
     where.push('follow_up_tasks.status = ?');
     params.push(status);
   }
+  appendFollowUpAccessScope(req, where, params);
 
   const rows = await all(
-    `SELECT follow_up_tasks.*, COALESCE(students.name, follow_up_tasks.studentName) AS studentName
+    `${followUpSelectSql()}
      FROM follow_up_tasks
-     LEFT JOIN students ON students.id = follow_up_tasks.student_id
-     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+     LEFT JOIN students ON students.id = follow_up_tasks.student_id AND students.tenant_id = follow_up_tasks.tenant_id
+     WHERE ${where.join(' AND ')}
      ORDER BY ${followUpOrderSql()}`,
     params
   );
-  res.json(rows.map(normalizeFollowUpTask));
+  res.json(rows.map((row) => followUpDtoForRole(row, roleOf(req))));
 });
 
-router.post('/api/follow-ups', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.STAFF), async (req, res) => {
+router.post('/api/follow-ups', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
   const {
     student_id,
     taskType,
@@ -653,48 +783,63 @@ router.post('/api/follow-ups', authMiddleware, requireTenant, requireAnyRole(ROL
     linkedType,
     linkedId,
   } = req.body;
+  const assignedToUserId = req.body.assignedToUserId || req.body.assigned_to_user_id || null;
+  const taskCategory = inferFollowupCategory(req.body);
+  const visibilityScope = taskCategory === 'ACADEMIC' ? 'TEACHER' : taskCategory === 'COUNSELLING' ? 'COUNSELLOR' : 'MANAGEMENT';
   const validationError = requireFields(req.body, ['student_id', 'taskType', 'dueDate']);
   if (validationError) return res.status(400).json({ error: validationError });
   const student = await get(`SELECT * FROM students WHERE id = ? AND tenant_id = ?`, [student_id, currentTenantId(req)]);
   if (!student) return res.status(404).json({ error: 'Student not found' });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO follow_up_tasks (tenant_id, student_id, studentName, taskType, dueDate, priority, assignedTo, status, notes, linkedType, linkedId, createdBy, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [currentTenantId(req), student_id, student.name, taskType, dueDate, priority, assignedTo || req.user.username, status, notes, linkedType, linkedId || null, req.user.username, now, now]
+    `INSERT INTO follow_up_tasks
+      (tenant_id, student_id, studentName, taskType, dueDate, priority, assignedTo, assigned_to_user_id,
+       task_category, visibility_scope, status, notes, linkedType, linkedId, createdBy, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), student_id, student.name, taskType, dueDate, priority, assignedTo || req.user.username,
+      assignedToUserId, taskCategory, visibilityScope, status, notes, linkedType, linkedId || null, req.user.username, now, now]
   );
-  res.json(await getFollowUpTask(result.lastID));
+  res.json(await getFollowUpTask(result.lastID, currentTenantId(req)));
 });
 
-router.put('/api/follow-ups/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.STAFF), async (req, res) => {
+router.put('/api/follow-ups/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
   const { taskType, dueDate, priority = 'Medium', assignedTo, status = 'Open', notes, linkedType, linkedId } = req.body;
+  const assignedToUserId = req.body.assignedToUserId || req.body.assigned_to_user_id || null;
+  const taskCategory = inferFollowupCategory(req.body);
+  const visibilityScope = taskCategory === 'ACADEMIC' ? 'TEACHER' : taskCategory === 'COUNSELLING' ? 'COUNSELLOR' : 'MANAGEMENT';
   const validationError = requireFields(req.body, ['taskType', 'dueDate']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const existing = await get(`SELECT * FROM follow_up_tasks WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT * FROM follow_up_tasks WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'Follow-up task not found' });
   const now = new Date().toISOString();
   await run(
     `UPDATE follow_up_tasks
-     SET taskType = ?, dueDate = ?, priority = ?, assignedTo = ?, status = ?, notes = ?, linkedType = ?, linkedId = ?, updatedAt = ?
+     SET taskType = ?, dueDate = ?, priority = ?, assignedTo = ?, assigned_to_user_id = ?,
+         task_category = ?, visibility_scope = ?, status = ?, notes = ?, linkedType = ?, linkedId = ?, updatedAt = ?
      WHERE id = ? AND tenant_id = ?`,
-    [taskType, dueDate, priority, assignedTo, status, notes, linkedType, linkedId || null, now, req.params.id]
+    [taskType, dueDate, priority, assignedTo, assignedToUserId, taskCategory, visibilityScope, status, notes,
+      linkedType, linkedId || null, now, req.params.id, currentTenantId(req)]
   );
-  res.json(await getFollowUpTask(req.params.id));
+  res.json(await getFollowUpTask(req.params.id, currentTenantId(req)));
 });
 
-router.patch('/api/follow-ups/:id/complete', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.STAFF), async (req, res) => {
-  const existing = await get(`SELECT * FROM follow_up_tasks WHERE id = ?`, [req.params.id]);
+router.patch('/api/follow-ups/:id/complete', authMiddleware, requireTenant, requireAnyRole(FOLLOWUP_ACCESS_ROLES), async (req, res) => {
+  const existing = await get(`SELECT * FROM follow_up_tasks WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'Follow-up task not found' });
+  if (!canMutateFollowUp(req, existing)) return res.status(403).json({ error: 'Forbidden' });
   const now = new Date().toISOString();
   const outcome = String(req.body.outcome || req.body.completionOutcome || '').trim();
   const completedBy = req.body.completedBy || req.user.username;
   await run(
-    `UPDATE follow_up_tasks SET status = ?, completionOutcome = ?, completedAt = ?, completedBy = ?, updatedAt = ? WHERE id = ?`,
-    ['Done', outcome || null, now, completedBy, now, req.params.id]
+    `UPDATE follow_up_tasks
+     SET status = ?, completionOutcome = ?, completedAt = ?, completedBy = ?, updatedAt = ?
+     WHERE id = ? AND tenant_id = ?`,
+    ['Done', outcome || null, now, completedBy, now, req.params.id, currentTenantId(req)]
   );
   await run(
-    `INSERT INTO student_history (student_id, type, title, detail, eventDate, createdAt) VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO student_history (tenant_id, student_id, type, title, detail, eventDate, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [
+      currentTenantId(req),
       existing.student_id,
       'Follow-up',
       `${existing.taskType || 'Follow-up'} completed`,
@@ -707,11 +852,13 @@ router.patch('/api/follow-ups/:id/complete', authMiddleware, requireTenant, requ
       now,
     ]
   );
-  res.json(await getFollowUpTask(req.params.id));
+  res.json(followUpDtoForRole(await getFollowUpTask(req.params.id, currentTenantId(req)), roleOf(req)));
 });
 
 router.delete('/api/follow-ups/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM follow_up_tasks WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM follow_up_tasks WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Follow-up task not found' });
+  await run(`DELETE FROM follow_up_tasks WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -723,15 +870,16 @@ router.post('/api/automation/follow-ups', authMiddleware, requireTenant, require
   const cutoff = new Date(today);
   cutoff.setDate(cutoff.getDate() - threshold);
   const cutoffDate = cutoff.toISOString().slice(0, 10);
-  const params = [cutoffDate];
+  const params = [currentTenantId(req), cutoffDate];
   const assignedFilter = assignedTo ? 'AND LOWER(COALESCE(follow_up_tasks.assignedTo, ?)) = LOWER(?)' : '';
   if (assignedTo) params.push('', assignedTo);
 
   const rows = await all(
     `SELECT follow_up_tasks.*, COALESCE(students.name, follow_up_tasks.studentName) AS studentName
      FROM follow_up_tasks
-     LEFT JOIN students ON students.id = follow_up_tasks.student_id
-     WHERE COALESCE(follow_up_tasks.status, 'Open') = 'Open'
+     LEFT JOIN students ON students.id = follow_up_tasks.student_id AND students.tenant_id = follow_up_tasks.tenant_id
+     WHERE follow_up_tasks.tenant_id = ?
+       AND COALESCE(follow_up_tasks.status, 'Open') = 'Open'
        AND follow_up_tasks.dueDate <= ?
        ${assignedFilter}
      ORDER BY ${followUpOrderSql()}`,
@@ -747,8 +895,9 @@ router.post('/api/automation/follow-ups', authMiddleware, requireTenant, require
   if (!dryRun) {
     for (const task of pendingEscalations) {
       await run(
-        `INSERT INTO student_history (student_id, type, title, detail, eventDate, createdAt) VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO student_history (tenant_id, student_id, type, title, detail, eventDate, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
+          currentTenantId(req),
           task.student_id || task.studentId,
           'Follow-up Escalation',
           `${task.taskType || 'Follow-up'} overdue escalation`,
@@ -765,8 +914,8 @@ router.post('/api/automation/follow-ups', authMiddleware, requireTenant, require
         ]
       );
       await run(
-        `UPDATE follow_up_tasks SET lastEscalatedAt = ?, escalationCount = COALESCE(escalationCount, 0) + 1, updatedAt = ? WHERE id = ?`,
-        [now, now, task.id]
+        `UPDATE follow_up_tasks SET lastEscalatedAt = ?, escalationCount = COALESCE(escalationCount, 0) + 1, updatedAt = ? WHERE id = ? AND tenant_id = ?`,
+        [now, now, task.id, currentTenantId(req)]
       );
     }
   }
@@ -1015,28 +1164,27 @@ async function renderMessageTemplate(templateKey, values, fallback) {
   return renderTemplateText(row.body, values);
 }
 
-async function writeFeeAudit(entityType, entityId, action, oldValue, newValue, changedBy) {
+async function writeFeeAudit(tenantId, entityType, entityId, action, oldValue, newValue, changedBy) {
   await run(
-    `INSERT INTO fee_audit_logs (entityType, entityId, action, oldValue, newValue, changedBy, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [entityType, entityId, action, oldValue ? JSON.stringify(oldValue) : null, newValue ? JSON.stringify(newValue) : null, changedBy || null, new Date().toISOString()]
+    `INSERT INTO fee_audit_logs (tenant_id, entityType, entityId, action, oldValue, newValue, changedBy, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [tenantId, entityType, entityId, action, oldValue ? JSON.stringify(oldValue) : null, newValue ? JSON.stringify(newValue) : null, changedBy || null, new Date().toISOString()]
   );
 }
 
-async function loadFeePlansWithPaid(tenantId = null) {
-  const tenantFilter = tenantId ? 'WHERE fee_plans.tenant_id = ?' : '';
-  const params = tenantId ? [tenantId] : [];
+async function loadFeePlansWithPaid(tenantId) {
+  if (tenantId === undefined || tenantId === null) throw new Error('tenantId is required to load fee plans');
   const rows = await all(
     `SELECT
       fee_plans.*,
       students.name AS studentName,
       COALESCE(SUM(fee_payments.amount), 0) AS paidAmount
     FROM fee_plans
-    INNER JOIN students ON students.id = fee_plans.student_id
-    LEFT JOIN fee_payments ON fee_payments.fee_plan_id = fee_plans.id AND COALESCE(fee_payments.status, 'Active') != 'Cancelled'
-    ${tenantFilter}
+    INNER JOIN students ON students.id = fee_plans.student_id AND students.tenant_id = fee_plans.tenant_id
+    LEFT JOIN fee_payments ON fee_payments.fee_plan_id = fee_plans.id AND fee_payments.tenant_id = fee_plans.tenant_id AND COALESCE(fee_payments.status, 'Active') != 'Cancelled'
+    WHERE fee_plans.tenant_id = ?
     GROUP BY fee_plans.id, students.name
     ORDER BY fee_plans.updatedAt DESC, fee_plans.id DESC`,
-    params
+    [tenantId]
   );
   return attachFeeDetailsMany(rows);
 }
@@ -1755,7 +1903,7 @@ router.post('/api/fee-plans', authMiddleware, requireTenant, requireAnyRole(ROLE
   );
   await syncFeeComponents(result.lastID, components);
   await syncFeeInstallments(result.lastID, installments);
-  await writeFeeAudit('fee_plan', result.lastID, 'created', null, req.body, req.user.username);
+  await writeFeeAudit(currentTenantId(req), 'fee_plan', result.lastID, 'created', null, req.body, req.user.username);
   const plan = await get(`SELECT fee_plans.*, students.name AS studentName, 0 AS paidAmount FROM fee_plans INNER JOIN students ON students.id = fee_plans.student_id WHERE fee_plans.id = ?`, [result.lastID]);
   res.json(await attachFeeDetails(plan));
 });
@@ -1829,7 +1977,7 @@ router.put('/api/fee-plans/:id', authMiddleware, requireTenant, requireAnyRole(R
   );
   await syncFeeComponents(id, components);
   await syncFeeInstallments(id, installments);
-  await writeFeeAudit('fee_plan', id, 'updated', existing, req.body, req.user.username);
+  await writeFeeAudit(currentTenantId(req), 'fee_plan', id, 'updated', existing, req.body, req.user.username);
   const plan = await get(
     `SELECT fee_plans.*, students.name AS studentName, COALESCE(SUM(fee_payments.amount), 0) AS paidAmount
      FROM fee_plans
@@ -1945,7 +2093,7 @@ router.post('/api/fee-payments', authMiddleware, requireTenant, requireAnyRole(R
      WHERE id = ? AND tenant_id = ?`,
     [fee_plan_id, currentTenantId(req), fee_plan_id, currentTenantId(req), now, fee_plan_id, currentTenantId(req)]
   );
-  await writeFeeAudit('fee_payment', result.lastID, 'created', null, req.body, req.user.username);
+  await writeFeeAudit(currentTenantId(req), 'fee_payment', result.lastID, 'created', null, req.body, req.user.username);
   const payment = await get(
     `SELECT
       fee_payments.*,
@@ -2016,7 +2164,7 @@ router.delete('/api/fee-payments/:id', authMiddleware, requireTenant, requireAny
       currentTenantId(req),
     ]
   );
-  await writeFeeAudit('fee_payment', id, 'cancelled', payment, { reason: req.body?.reason || 'Cancelled by admin' }, req.user.username);
+  await writeFeeAudit(currentTenantId(req), 'fee_payment', id, 'cancelled', payment, { reason: req.body?.reason || 'Cancelled by admin' }, req.user.username);
   res.json({ ok: true });
 });
 
@@ -2065,9 +2213,10 @@ router.get('/api/fees/reports', authMiddleware, requireTenant, requireAnyRole(RO
   const staffRows = await all(
     `SELECT receivedBy, COALESCE(SUM(amount), 0) AS amountCollected, COUNT(DISTINCT student_id) AS students
      FROM fee_payments
-     WHERE COALESCE(status, 'Active') != 'Cancelled'
+     WHERE COALESCE(status, 'Active') != 'Cancelled' AND tenant_id = ?
      GROUP BY receivedBy
-     ORDER BY amountCollected DESC`
+     ORDER BY amountCollected DESC`,
+    [currentTenantId(req)]
   );
   const staffWise = staffRows.map((row) => ({
     staff: row.receivedBy || 'Unassigned',
@@ -2086,7 +2235,7 @@ router.get('/api/fees/reports', authMiddleware, requireTenant, requireAnyRole(RO
 });
 
 router.get('/api/fees/reminders', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.FINANCE), async (req, res) => {
-  const plans = await loadFeePlansWithPaid();
+  const plans = await loadFeePlansWithPaid(currentTenantId(req));
   const reminders = [];
   for (const plan of plans) {
     if (plan.dueAmount <= 0) continue;
@@ -2117,13 +2266,15 @@ router.post('/api/fees/reminders', authMiddleware, requireTenant, requireAnyRole
   const { student_id, fee_plan_id, installment_id, reminderType, sentVia, message } = req.body;
   const validationError = requireFields(req.body, ['student_id', 'fee_plan_id', 'reminderType', 'sentVia']);
   if (validationError) return res.status(400).json({ error: validationError });
+  const plan = await get(`SELECT id FROM fee_plans WHERE id = ? AND student_id = ? AND tenant_id = ?`, [fee_plan_id, student_id, currentTenantId(req)]);
+  if (!plan) return res.status(404).json({ error: 'Fee plan not found' });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO fee_reminders (student_id, fee_plan_id, installment_id, reminderType, sentVia, sentAt, status, message, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [student_id, fee_plan_id, installment_id || null, reminderType, sentVia, now, 'Marked Sent', message || null, now]
+    `INSERT INTO fee_reminders (tenant_id, student_id, fee_plan_id, installment_id, reminderType, sentVia, sentAt, status, message, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), student_id, fee_plan_id, installment_id || null, reminderType, sentVia, now, 'Marked Sent', message || null, now]
   );
-  const reminder = await get(`SELECT * FROM fee_reminders WHERE id = ?`, [result.lastID]);
+  const reminder = await get(`SELECT * FROM fee_reminders WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]);
   res.json(reminder);
 });
 
@@ -2135,10 +2286,12 @@ router.post('/api/automation/fees', authMiddleware, requireTenant, requireAnyRol
     `SELECT fee_plans.*, students.name AS studentName, students.data AS studentData,
       COALESCE(SUM(fee_payments.amount), 0) AS paidAmount
      FROM fee_plans
-     LEFT JOIN students ON students.id = fee_plans.student_id
-     LEFT JOIN fee_payments ON fee_payments.fee_plan_id = fee_plans.id AND COALESCE(fee_payments.status, 'Active') != 'Cancelled'
+     LEFT JOIN students ON students.id = fee_plans.student_id AND students.tenant_id = fee_plans.tenant_id
+     LEFT JOIN fee_payments ON fee_payments.fee_plan_id = fee_plans.id AND fee_payments.tenant_id = fee_plans.tenant_id AND COALESCE(fee_payments.status, 'Active') != 'Cancelled'
+     WHERE fee_plans.tenant_id = ?
      GROUP BY fee_plans.id, students.name, students.data
-     ORDER BY fee_plans.dueDate ASC, fee_plans.id DESC`
+     ORDER BY fee_plans.dueDate ASC, fee_plans.id DESC`,
+    [currentTenantId(req)]
   );
   const plans = (await attachFeeDetailsMany(planRows)).filter((plan) => Number(plan.dueAmount || 0) > 0);
   const queued = [];
@@ -2158,13 +2311,13 @@ router.post('/api/automation/fees', authMiddleware, requireTenant, requireAnyRol
       const duplicate = installment.id
         ? await get(
           `SELECT id FROM fee_reminders
-           WHERE fee_plan_id = ? AND installment_id = ? AND reminderType = ? AND substr(sentAt, 1, 10) = ?`,
-          [plan.id, installment.id, reminderType, today]
+           WHERE tenant_id = ? AND fee_plan_id = ? AND installment_id = ? AND reminderType = ? AND substr(sentAt, 1, 10) = ?`,
+          [currentTenantId(req), plan.id, installment.id, reminderType, today]
         )
         : await get(
           `SELECT id FROM fee_reminders
-           WHERE fee_plan_id = ? AND installment_id IS NULL AND reminderType = ? AND substr(sentAt, 1, 10) = ?`,
-          [plan.id, reminderType, today]
+           WHERE tenant_id = ? AND fee_plan_id = ? AND installment_id IS NULL AND reminderType = ? AND substr(sentAt, 1, 10) = ?`,
+          [currentTenantId(req), plan.id, reminderType, today]
         );
 
       const templateKey = reminderType === 'After Due Date' || reminderType === 'Final Reminder'
@@ -2220,9 +2373,9 @@ router.post('/api/automation/fees', authMiddleware, requireTenant, requireAnyRol
         row.provider = delivery.provider;
         row.deliveryError = delivery.error || '';
         const result = await run(
-          `INSERT INTO fee_reminders (student_id, fee_plan_id, installment_id, reminderType, sentVia, sentAt, status, message, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [row.student_id, row.fee_plan_id, row.installment_id, row.reminderType, row.sentVia, now, row.status, row.message, now]
+          `INSERT INTO fee_reminders (tenant_id, student_id, fee_plan_id, installment_id, reminderType, sentVia, sentAt, status, message, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [currentTenantId(req), row.student_id, row.fee_plan_id, row.installment_id, row.reminderType, row.sentVia, now, row.status, row.message, now]
         );
         row.id = result.lastID;
       } else {
@@ -2234,7 +2387,7 @@ router.post('/api/automation/fees', authMiddleware, requireTenant, requireAnyRol
   }
 
   if (!dryRun && queued.length) {
-    await writeFeeAudit('fee_reminder', 0, 'automation_run', null, { count: queued.length, sentVia, sendNow }, req.user.username);
+    await writeFeeAudit(currentTenantId(req), 'fee_reminder', 0, 'automation_run', null, { count: queued.length, sentVia, sendNow }, req.user.username);
   }
   const counts = queued.reduce((acc, row) => {
     const key = String(row.status || 'Queued').replace(/\s+/g, '').toLowerCase();
@@ -2263,18 +2416,19 @@ router.get('/api/whatsapp/status', authMiddleware, requireTenant, requireAnyRole
   const recentFailures = await all(
     `SELECT fee_reminders.*, students.name AS studentName, fee_plans.courseProgram
      FROM fee_reminders
-     LEFT JOIN students ON students.id = fee_reminders.student_id
-     LEFT JOIN fee_plans ON fee_plans.id = fee_reminders.fee_plan_id
-     WHERE fee_reminders.status IN ('Failed', 'Missing Phone')
+     LEFT JOIN students ON students.id = fee_reminders.student_id AND students.tenant_id = fee_reminders.tenant_id
+     LEFT JOIN fee_plans ON fee_plans.id = fee_reminders.fee_plan_id AND fee_plans.tenant_id = fee_reminders.tenant_id
+     WHERE fee_reminders.tenant_id = ? AND fee_reminders.status IN ('Failed', 'Missing Phone')
      ORDER BY fee_reminders.sentAt DESC, fee_reminders.id DESC
-     LIMIT 10`
+     LIMIT 10`,
+    [currentTenantId(req)]
   );
   const recentQueued = await all(
     `SELECT status, COUNT(*) AS count
      FROM fee_reminders
-     WHERE sentAt >= ?
+     WHERE tenant_id = ? AND sentAt >= ?
      GROUP BY status`,
-    [new Date(Date.now() - 7 * 86400000).toISOString()]
+    [currentTenantId(req), new Date(Date.now() - 7 * 86400000).toISOString()]
   );
 
   res.json({
@@ -2331,7 +2485,7 @@ router.put('/api/message-templates/:id', authMiddleware, requireTenant, requireA
 });
 
 router.get('/api/fees/audit-logs', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.FINANCE), async (req, res) => {
-  const rows = await all(`SELECT * FROM fee_audit_logs ORDER BY createdAt DESC, id DESC LIMIT 100`);
+  const rows = await all(`SELECT * FROM fee_audit_logs WHERE tenant_id = ? ORDER BY createdAt DESC, id DESC LIMIT 100`, [currentTenantId(req)]);
   res.json(rows.map((row) => ({
     ...row,
     oldValue: row.oldValue ? JSON.parse(row.oldValue) : null,
@@ -2893,23 +3047,23 @@ router.post('/api/staff-attendance/check-in', authMiddleware, requireTenant, asy
   const { staff_id, branchName = 'Tembhurni', scheduledStart = '07:00', scheduledLectures = 0, remarks } = req.body;
   const validationError = requireFields(req.body, ['staff_id']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const staff = await get(`SELECT * FROM teachers WHERE id = ?`, [staff_id]);
+  const staff = await get(`SELECT * FROM teachers WHERE id = ? AND tenant_id = ?`, [staff_id, currentTenantId(req)]);
   if (!staff) return res.status(404).json({ error: 'Staff member not found' });
   const now = new Date();
   const date = now.toISOString().slice(0, 10);
   const checkIn = now.toTimeString().slice(0, 5);
   const lateMinutes = minutesLate(checkIn, scheduledStart);
   const status = staffStatusFromLateMinutes(lateMinutes);
-  const existing = await get(`SELECT * FROM staff_attendance_records WHERE staff_id = ? AND date = ?`, [staff_id, date]);
+  const existing = await get(`SELECT * FROM staff_attendance_records WHERE staff_id = ? AND date = ? AND tenant_id = ?`, [staff_id, date, currentTenantId(req)]);
   if (existing) return res.status(400).json({ error: 'Staff already checked in today' });
   const result = await run(
     `INSERT INTO staff_attendance_records (
-      staff_id, staffName, role, branchName, date, checkIn, status, lateMinutes,
+      tenant_id, staff_id, staffName, role, branchName, date, checkIn, status, lateMinutes,
       scheduledLectures, lecturesTaken, missedLectures, replacementRequired, remarks, createdAt, updatedAt
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [staff_id, staff.name, staff.subject || 'Teacher', branchName, date, checkIn, status, lateMinutes, Number(scheduledLectures || 0), 0, Number(scheduledLectures || 0), Number(scheduledLectures || 0) > 0 && status === 'Admin Approval Required' ? 'Yes' : 'No', remarks, now.toISOString(), now.toISOString()]
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), staff_id, staff.name, staff.subject || 'Teacher', branchName, date, checkIn, status, lateMinutes, Number(scheduledLectures || 0), 0, Number(scheduledLectures || 0), Number(scheduledLectures || 0) > 0 && status === 'Admin Approval Required' ? 'Yes' : 'No', remarks, now.toISOString(), now.toISOString()]
   );
-  res.json(await get(`SELECT * FROM staff_attendance_records WHERE id = ?`, [result.lastID]));
+  res.json(await get(`SELECT * FROM staff_attendance_records WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]));
 });
 
 router.post('/api/staff-attendance/check-out', authMiddleware, requireTenant, async (req, res) => {
@@ -2918,24 +3072,24 @@ router.post('/api/staff-attendance/check-out', authMiddleware, requireTenant, as
   if (validationError) return res.status(400).json({ error: validationError });
   const now = new Date();
   const date = now.toISOString().slice(0, 10);
-  const existing = await get(`SELECT * FROM staff_attendance_records WHERE staff_id = ? AND date = ?`, [staff_id, date]);
+  const existing = await get(`SELECT * FROM staff_attendance_records WHERE staff_id = ? AND date = ? AND tenant_id = ?`, [staff_id, date, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'No check-in found for today' });
   const missedLectures = Math.max(0, Number(existing.scheduledLectures || 0) - Number(lecturesTaken || 0));
   await run(
-    `UPDATE staff_attendance_records SET checkOut = ?, lecturesTaken = ?, missedLectures = ?, replacementRequired = ?, remarks = ?, updatedAt = ? WHERE id = ?`,
-    [now.toTimeString().slice(0, 5), Number(lecturesTaken || 0), missedLectures, missedLectures > 0 ? 'Yes' : existing.replacementRequired || 'No', remarks || existing.remarks, now.toISOString(), existing.id]
+    `UPDATE staff_attendance_records SET checkOut = ?, lecturesTaken = ?, missedLectures = ?, replacementRequired = ?, remarks = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`,
+    [now.toTimeString().slice(0, 5), Number(lecturesTaken || 0), missedLectures, missedLectures > 0 ? 'Yes' : existing.replacementRequired || 'No', remarks || existing.remarks, now.toISOString(), existing.id, currentTenantId(req)]
   );
-  res.json(await get(`SELECT * FROM staff_attendance_records WHERE id = ?`, [existing.id]));
+  res.json(await get(`SELECT * FROM staff_attendance_records WHERE id = ? AND tenant_id = ?`, [existing.id, currentTenantId(req)]));
 });
 
 router.get('/api/staff-attendance/today', authMiddleware, requireTenant, async (req, res) => {
   const date = req.query.date || new Date().toISOString().slice(0, 10);
-  res.json(await all(`SELECT * FROM staff_attendance_records WHERE date = ? ORDER BY checkIn ASC, staffName ASC`, [date]));
+  res.json(await all(`SELECT * FROM staff_attendance_records WHERE date = ? AND tenant_id = ? ORDER BY checkIn ASC, staffName ASC`, [date, currentTenantId(req)]));
 });
 
 router.get('/api/staff-attendance/monthly', authMiddleware, requireTenant, async (req, res) => {
   const month = req.query.month || new Date().toISOString().slice(0, 7);
-  const rows = await all(`SELECT * FROM staff_attendance_records WHERE date LIKE ? ORDER BY date DESC, staffName ASC`, [`${month}%`]);
+  const rows = await all(`SELECT * FROM staff_attendance_records WHERE date LIKE ? AND tenant_id = ? ORDER BY date DESC, staffName ASC`, [`${month}%`, currentTenantId(req)]);
   const summary = Object.values(rows.reduce((acc, row) => {
     const key = row.staffName || row.staff_id;
     if (!acc[key]) acc[key] = { staffName: row.staffName, presentDays: 0, lateMarks: 0, halfDays: 0, absentDays: 0, missedLectures: 0, replacementRequired: 0 };
@@ -2958,34 +3112,36 @@ router.post('/api/leave-requests', authMiddleware, requireTenant, async (req, re
   const { staff_id, leaveType, fromDate, toDate, reason, replacementTeacher } = req.body;
   const validationError = requireFields(req.body, ['staff_id', 'leaveType', 'fromDate', 'toDate', 'reason']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const staff = await get(`SELECT * FROM teachers WHERE id = ?`, [staff_id]);
+  const staff = await get(`SELECT * FROM teachers WHERE id = ? AND tenant_id = ?`, [staff_id, currentTenantId(req)]);
   if (!staff) return res.status(404).json({ error: 'Staff member not found' });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO leave_requests (staff_id, staffName, leaveType, fromDate, toDate, reason, replacementTeacher, status, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [staff_id, staff.name, leaveType, fromDate, toDate, reason, replacementTeacher, 'Pending', now, now]
+    `INSERT INTO leave_requests (tenant_id, staff_id, staffName, leaveType, fromDate, toDate, reason, replacementTeacher, status, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), staff_id, staff.name, leaveType, fromDate, toDate, reason, replacementTeacher, 'Pending', now, now]
   );
-  res.json(await get(`SELECT * FROM leave_requests WHERE id = ?`, [result.lastID]));
+  res.json(await get(`SELECT * FROM leave_requests WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]));
 });
 
 router.get('/api/leave-requests', authMiddleware, requireTenant, async (req, res) => {
-  res.json(await all(`SELECT * FROM leave_requests ORDER BY createdAt DESC, id DESC`));
+  res.json(await all(`SELECT * FROM leave_requests WHERE tenant_id = ? ORDER BY createdAt DESC, id DESC`, [currentTenantId(req)]));
 });
 
 router.patch('/api/leave-requests/:id/approve', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
+  const existing = await get(`SELECT id FROM leave_requests WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Leave request not found' });
   const now = new Date().toISOString();
-  await run(`UPDATE leave_requests SET status = ?, approvedBy = ?, approvedAt = ?, updatedAt = ? WHERE id = ?`, ['Approved', req.user.username, now, now, req.params.id]);
-  const row = await get(`SELECT * FROM leave_requests WHERE id = ?`, [req.params.id]);
-  if (!row) return res.status(404).json({ error: 'Leave request not found' });
+  await run(`UPDATE leave_requests SET status = ?, approvedBy = ?, approvedAt = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`, ['Approved', req.user.username, now, now, req.params.id, currentTenantId(req)]);
+  const row = await get(`SELECT * FROM leave_requests WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json(row);
 });
 
 router.patch('/api/leave-requests/:id/reject', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
+  const existing = await get(`SELECT id FROM leave_requests WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Leave request not found' });
   const now = new Date().toISOString();
-  await run(`UPDATE leave_requests SET status = ?, approvedBy = ?, approvedAt = ?, updatedAt = ? WHERE id = ?`, ['Rejected', req.user.username, now, now, req.params.id]);
-  const row = await get(`SELECT * FROM leave_requests WHERE id = ?`, [req.params.id]);
-  if (!row) return res.status(404).json({ error: 'Leave request not found' });
+  await run(`UPDATE leave_requests SET status = ?, approvedBy = ?, approvedAt = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`, ['Rejected', req.user.username, now, now, req.params.id, currentTenantId(req)]);
+  const row = await get(`SELECT * FROM leave_requests WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json(row);
 });
 
@@ -2993,52 +3149,56 @@ router.post('/api/attendance/corrections', authMiddleware, requireTenant, async 
   const { record_id, newStatus, requestReason } = req.body;
   const validationError = requireFields(req.body, ['record_id', 'newStatus', 'requestReason']);
   if (validationError) return res.status(400).json({ error: validationError });
-  const record = await get(`SELECT * FROM attendance_records WHERE id = ?`, [record_id]);
+  const record = await get(`SELECT * FROM attendance_records WHERE id = ? AND tenant_id = ?`, [record_id, currentTenantId(req)]);
   if (!record) return res.status(404).json({ error: 'Attendance record not found' });
   const result = await run(
-    `INSERT INTO attendance_correction_requests (record_id, session_id, student_id, oldStatus, newStatus, requestReason, status, requestedBy, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [record_id, record.session_id, record.student_id, record.status, newStatus, requestReason, 'Pending', req.user.username, new Date().toISOString()]
+    `INSERT INTO attendance_correction_requests (tenant_id, record_id, session_id, student_id, oldStatus, newStatus, requestReason, status, requestedBy, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), record_id, record.session_id, record.student_id, record.status, newStatus, requestReason, 'Pending', req.user.username, new Date().toISOString()]
   );
-  res.json(await get(`SELECT * FROM attendance_correction_requests WHERE id = ?`, [result.lastID]));
+  res.json(await get(`SELECT * FROM attendance_correction_requests WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]));
 });
 
 router.get('/api/attendance/corrections', authMiddleware, requireTenant, async (req, res) => {
   res.json(await all(
     `SELECT attendance_correction_requests.*, students.name AS studentName
      FROM attendance_correction_requests
-     LEFT JOIN students ON students.id = attendance_correction_requests.student_id
+     LEFT JOIN students ON students.id = attendance_correction_requests.student_id AND students.tenant_id = attendance_correction_requests.tenant_id
+     WHERE attendance_correction_requests.tenant_id = ?
      ORDER BY attendance_correction_requests.createdAt DESC`
+    , [currentTenantId(req)]
   ));
 });
 
 router.patch('/api/attendance/corrections/:id/approve', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  const correction = await get(`SELECT * FROM attendance_correction_requests WHERE id = ?`, [req.params.id]);
+  const correction = await get(`SELECT * FROM attendance_correction_requests WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   if (!correction) return res.status(404).json({ error: 'Correction request not found' });
   const now = new Date().toISOString();
-  await run(`UPDATE attendance_records SET status = ?, updatedAt = ? WHERE id = ?`, [correction.newStatus, now, correction.record_id]);
-  await run(`UPDATE attendance_correction_requests SET status = ?, resolvedBy = ?, resolvedAt = ? WHERE id = ?`, ['Approved', req.user.username, now, req.params.id]);
-  res.json(await get(`SELECT * FROM attendance_correction_requests WHERE id = ?`, [req.params.id]));
+  await run(`UPDATE attendance_records SET status = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`, [correction.newStatus, now, correction.record_id, currentTenantId(req)]);
+  await run(`UPDATE attendance_correction_requests SET status = ?, resolvedBy = ?, resolvedAt = ? WHERE id = ? AND tenant_id = ?`, ['Approved', req.user.username, now, req.params.id, currentTenantId(req)]);
+  res.json(await get(`SELECT * FROM attendance_correction_requests WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]));
 });
 
 router.patch('/api/attendance/corrections/:id/reject', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
+  const existing = await get(`SELECT id FROM attendance_correction_requests WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Correction request not found' });
   const now = new Date().toISOString();
-  await run(`UPDATE attendance_correction_requests SET status = ?, resolvedBy = ?, resolvedAt = ? WHERE id = ?`, ['Rejected', req.user.username, now, req.params.id]);
-  const row = await get(`SELECT * FROM attendance_correction_requests WHERE id = ?`, [req.params.id]);
-  if (!row) return res.status(404).json({ error: 'Correction request not found' });
+  await run(`UPDATE attendance_correction_requests SET status = ?, resolvedBy = ?, resolvedAt = ? WHERE id = ? AND tenant_id = ?`, ['Rejected', req.user.username, now, req.params.id, currentTenantId(req)]);
+  const row = await get(`SELECT * FROM attendance_correction_requests WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json(row);
 });
 
 router.get('/api/automation/logs', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM automation_logs ORDER BY createdAt DESC, id DESC LIMIT 150`);
+  const rows = await all(`SELECT * FROM automation_logs WHERE tenant_id = ? ORDER BY createdAt DESC, id DESC LIMIT 150`, [currentTenantId(req)]);
   res.json(rows);
 });
 
 router.patch('/api/automation/logs/:id/sent', authMiddleware, requireTenant, async (req, res) => {
+  const existing = await get(`SELECT id FROM automation_logs WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Automation log not found' });
   const now = new Date().toISOString();
-  await run(`UPDATE automation_logs SET status = ?, sentAt = ?, processedAt = ? WHERE id = ?`, ['Sent', now, now, req.params.id]);
-  const row = await get(`SELECT * FROM automation_logs WHERE id = ?`, [req.params.id]);
-  if (!row) return res.status(404).json({ error: 'Automation log not found' });
+  await run(`UPDATE automation_logs SET status = ?, sentAt = ?, processedAt = ? WHERE id = ? AND tenant_id = ?`, ['Sent', now, now, req.params.id, currentTenantId(req)]);
+  const row = await get(`SELECT * FROM automation_logs WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json(row);
 });
 
@@ -3108,11 +3268,11 @@ router.get('/api/automation/batch-discipline', authMiddleware, requireTenant, as
       SUM(CASE WHEN attendance_records.status = 'Absent' THEN 1 ELSE 0 END) AS absentRows,
       SUM(CASE WHEN attendance_records.status = 'Late' THEN 1 ELSE 0 END) AS lateRows
      FROM attendance_records
-     INNER JOIN attendance_sessions ON attendance_sessions.id = attendance_records.session_id
-     WHERE attendance_sessions.date LIKE ?
+     INNER JOIN attendance_sessions ON attendance_sessions.id = attendance_records.session_id AND attendance_sessions.tenant_id = attendance_records.tenant_id
+     WHERE attendance_sessions.date LIKE ? AND attendance_records.tenant_id = ?
      GROUP BY attendance_sessions.batch
      ORDER BY attendance_sessions.batch`,
-    [`${month}%`]
+    [`${month}%`, currentTenantId(req)]
   );
   res.json(rows.map((row) => {
     const averageAttendance = Number(row.totalRows || 0) ? Math.round((Number(row.attendedRows || 0) / Number(row.totalRows || 0)) * 100) : 0;
@@ -3200,15 +3360,15 @@ function makeAiLabCertificateId(id) {
   return `PK-AILAB-${new Date().getFullYear()}-${String(id).padStart(3, '0')}`;
 }
 
-async function loadAiLabDashboard() {
-  const students = (await all(`SELECT * FROM ai_lab_students ORDER BY id DESC`)).map(normalizeAiLabStudent);
-  const courses = await all(`SELECT * FROM ai_lab_courses ORDER BY courseName ASC`);
-  const attendanceRows = await all(`SELECT status FROM ai_lab_attendance`);
-  const assignmentRows = await all(`SELECT status FROM ai_lab_assignments`);
-  const projectRows = await all(`SELECT status, finalDemoStatus FROM ai_lab_projects`);
-  const deviceRows = await all(`SELECT status FROM ai_lab_devices`);
-  const portfolioRows = await all(`SELECT status, githubUsername, projectRepository FROM ai_lab_portfolios`);
-  const certificateRows = await all(`SELECT status FROM ai_lab_certificates`);
+async function loadAiLabDashboard(tenantId) {
+  const students = (await all(`SELECT * FROM ai_lab_students WHERE tenant_id = ? ORDER BY id DESC`, [tenantId])).map(normalizeAiLabStudent);
+  const courses = await all(`SELECT * FROM ai_lab_courses WHERE tenant_id = ? ORDER BY courseName ASC`, [tenantId]);
+  const attendanceRows = await all(`SELECT status FROM ai_lab_attendance WHERE tenant_id = ?`, [tenantId]);
+  const assignmentRows = await all(`SELECT status FROM ai_lab_assignments WHERE tenant_id = ?`, [tenantId]);
+  const projectRows = await all(`SELECT status, finalDemoStatus FROM ai_lab_projects WHERE tenant_id = ?`, [tenantId]);
+  const deviceRows = await all(`SELECT status FROM ai_lab_devices WHERE tenant_id = ?`, [tenantId]);
+  const portfolioRows = await all(`SELECT status, githubUsername, projectRepository FROM ai_lab_portfolios WHERE tenant_id = ?`, [tenantId]);
+  const certificateRows = await all(`SELECT status FROM ai_lab_certificates WHERE tenant_id = ?`, [tenantId]);
   const totalAttendance = attendanceRows.length;
   const attended = attendanceRows.filter((row) => ['Present', 'Late'].includes(row.status)).length;
   const submittedAssignments = assignmentRows.filter((row) => ['Submitted', 'Late'].includes(row.status)).length;
@@ -3234,12 +3394,12 @@ async function loadAiLabDashboard() {
 }
 
 router.get('/api/ai-lab/dashboard', authMiddleware, requireTenant, async (req, res) => {
-  res.json(await loadAiLabDashboard());
+  res.json(await loadAiLabDashboard(currentTenantId(req)));
 });
 
 router.get('/api/ai-lab/courses', authMiddleware, requireTenant, async (req, res) => {
-  const courses = await all(`SELECT * FROM ai_lab_courses ORDER BY courseName ASC`);
-  const modules = await all(`SELECT * FROM ai_lab_modules ORDER BY course_id ASC, moduleOrder ASC, id ASC`);
+  const courses = await all(`SELECT * FROM ai_lab_courses WHERE tenant_id = ? ORDER BY courseName ASC`, [currentTenantId(req)]);
+  const modules = await all(`SELECT * FROM ai_lab_modules WHERE tenant_id = ? ORDER BY course_id ASC, moduleOrder ASC, id ASC`, [currentTenantId(req)]);
   res.json(courses.map((course) => ({ ...course, modules: modules.filter((module) => Number(module.course_id) === Number(course.id)) })));
 });
 
@@ -3249,14 +3409,14 @@ router.post('/api/ai-lab/courses', authMiddleware, requireTenant, async (req, re
   if (validationError) return res.status(400).json({ error: validationError });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO ai_lab_courses (courseName, category, suitableFor, duration, exampleTopics, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [courseName, category, suitableFor, duration, exampleTopics, status, now, now]
+    `INSERT INTO ai_lab_courses (tenant_id, courseName, category, suitableFor, duration, exampleTopics, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), courseName, category, suitableFor, duration, exampleTopics, status, now, now]
   );
   for (const [index, module] of modules.entries()) {
     if (!module.moduleName && !module.topics) continue;
     await run(
-      `INSERT INTO ai_lab_modules (course_id, moduleOrder, moduleName, topics, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [result.lastID, module.moduleOrder || index + 1, module.moduleName, module.topics, module.status || 'Pending', now, now]
+      `INSERT INTO ai_lab_modules (tenant_id, course_id, moduleOrder, moduleName, topics, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [currentTenantId(req), result.lastID, module.moduleOrder || index + 1, module.moduleName, module.topics, module.status || 'Pending', now, now]
     );
   }
   const row = await get(`SELECT * FROM ai_lab_courses WHERE id = ?`, [result.lastID]);
@@ -3265,27 +3425,29 @@ router.post('/api/ai-lab/courses', authMiddleware, requireTenant, async (req, re
 
 router.put('/api/ai-lab/courses/:id', authMiddleware, requireTenant, async (req, res) => {
   const { courseName, category, suitableFor, duration, exampleTopics, status = 'Active', modules = [] } = req.body;
-  const existing = await get(`SELECT * FROM ai_lab_courses WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT * FROM ai_lab_courses WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'AI Lab course not found' });
   const now = new Date().toISOString();
   await run(
-    `UPDATE ai_lab_courses SET courseName = ?, category = ?, suitableFor = ?, duration = ?, exampleTopics = ?, status = ?, updatedAt = ? WHERE id = ?`,
-    [courseName, category, suitableFor, duration, exampleTopics, status, now, req.params.id]
+    `UPDATE ai_lab_courses SET courseName = ?, category = ?, suitableFor = ?, duration = ?, exampleTopics = ?, status = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`,
+    [courseName, category, suitableFor, duration, exampleTopics, status, now, req.params.id, currentTenantId(req)]
   );
-  await run(`DELETE FROM ai_lab_modules WHERE course_id = ?`, [req.params.id]);
+  await run(`DELETE FROM ai_lab_modules WHERE course_id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   for (const [index, module] of modules.entries()) {
     if (!module.moduleName && !module.topics) continue;
     await run(
-      `INSERT INTO ai_lab_modules (course_id, moduleOrder, moduleName, topics, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [req.params.id, module.moduleOrder || index + 1, module.moduleName, module.topics, module.status || 'Pending', now, now]
+      `INSERT INTO ai_lab_modules (tenant_id, course_id, moduleOrder, moduleName, topics, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [currentTenantId(req), req.params.id, module.moduleOrder || index + 1, module.moduleName, module.topics, module.status || 'Pending', now, now]
     );
   }
-  res.json(await get(`SELECT * FROM ai_lab_courses WHERE id = ?`, [req.params.id]));
+  res.json(await get(`SELECT * FROM ai_lab_courses WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]));
 });
 
 router.delete('/api/ai-lab/courses/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM ai_lab_modules WHERE course_id = ?`, [req.params.id]);
-  await run(`DELETE FROM ai_lab_courses WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM ai_lab_courses WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'AI Lab course not found' });
+  await run(`DELETE FROM ai_lab_modules WHERE course_id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  await run(`DELETE FROM ai_lab_courses WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -3293,8 +3455,10 @@ router.get('/api/ai-lab/students', authMiddleware, requireTenant, async (req, re
   const rows = await all(
     `SELECT ai_lab_students.*, students.name AS linkedStudentName
      FROM ai_lab_students
-     LEFT JOIN students ON students.id = ai_lab_students.student_id
+     LEFT JOIN students ON students.id = ai_lab_students.student_id AND students.tenant_id = ai_lab_students.tenant_id
+     WHERE ai_lab_students.tenant_id = ?
      ORDER BY ai_lab_students.id DESC`
+    , [currentTenantId(req)]
   );
   res.json(rows.map(normalizeAiLabStudent));
 });
@@ -3303,35 +3467,37 @@ router.post('/api/ai-lab/students', authMiddleware, requireTenant, async (req, r
   const { student_id, studentName, grade, school, parentName, mobileNumber, course_id, courseName, batch, joiningDate, courseDuration, feeType, deviceRequired = false, previousCodingExperience, skillLevel = 0, skillAssessment, status = 'Active' } = req.body;
   const validationError = requireFields({ studentName, courseName }, ['studentName', 'courseName']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (student_id && !(await get(`SELECT id FROM students WHERE id = ? AND tenant_id = ?`, [student_id, currentTenantId(req)]))) return res.status(404).json({ error: 'Student not found' });
+  if (course_id && !(await get(`SELECT id FROM ai_lab_courses WHERE id = ? AND tenant_id = ?`, [course_id, currentTenantId(req)]))) return res.status(404).json({ error: 'AI Lab course not found' });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO ai_lab_students (student_id, studentName, grade, school, parentName, mobileNumber, course_id, courseName, batch, joiningDate, courseDuration, feeType, deviceRequired, previousCodingExperience, skillLevel, skillAssessment, status, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [student_id || null, studentName, grade, school, parentName, mobileNumber, course_id || null, courseName, batch, joiningDate, courseDuration, feeType, deviceRequired ? 1 : 0, previousCodingExperience, Number(skillLevel || 0), skillAssessment, status, now, now]
+    `INSERT INTO ai_lab_students (tenant_id, student_id, studentName, grade, school, parentName, mobileNumber, course_id, courseName, batch, joiningDate, courseDuration, feeType, deviceRequired, previousCodingExperience, skillLevel, skillAssessment, status, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), student_id || null, studentName, grade, school, parentName, mobileNumber, course_id || null, courseName, batch, joiningDate, courseDuration, feeType, deviceRequired ? 1 : 0, previousCodingExperience, Number(skillLevel || 0), skillAssessment, status, now, now]
   );
   res.json(normalizeAiLabStudent(await get(`SELECT * FROM ai_lab_students WHERE id = ?`, [result.lastID])));
 });
 
 router.put('/api/ai-lab/students/:id', authMiddleware, requireTenant, async (req, res) => {
   const { student_id, studentName, grade, school, parentName, mobileNumber, course_id, courseName, batch, joiningDate, courseDuration, feeType, deviceRequired = false, previousCodingExperience, skillLevel = 0, skillAssessment, status = 'Active' } = req.body;
-  const existing = await get(`SELECT * FROM ai_lab_students WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT * FROM ai_lab_students WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   if (!existing) return res.status(404).json({ error: 'AI Lab student not found' });
+  if (student_id && !(await get(`SELECT id FROM students WHERE id = ? AND tenant_id = ?`, [student_id, currentTenantId(req)]))) return res.status(404).json({ error: 'Student not found' });
+  if (course_id && !(await get(`SELECT id FROM ai_lab_courses WHERE id = ? AND tenant_id = ?`, [course_id, currentTenantId(req)]))) return res.status(404).json({ error: 'AI Lab course not found' });
   await run(
-    `UPDATE ai_lab_students SET student_id = ?, studentName = ?, grade = ?, school = ?, parentName = ?, mobileNumber = ?, course_id = ?, courseName = ?, batch = ?, joiningDate = ?, courseDuration = ?, feeType = ?, deviceRequired = ?, previousCodingExperience = ?, skillLevel = ?, skillAssessment = ?, status = ?, updatedAt = ? WHERE id = ?`,
-    [student_id || null, studentName, grade, school, parentName, mobileNumber, course_id || null, courseName, batch, joiningDate, courseDuration, feeType, deviceRequired ? 1 : 0, previousCodingExperience, Number(skillLevel || 0), skillAssessment, status, new Date().toISOString(), req.params.id]
+    `UPDATE ai_lab_students SET student_id = ?, studentName = ?, grade = ?, school = ?, parentName = ?, mobileNumber = ?, course_id = ?, courseName = ?, batch = ?, joiningDate = ?, courseDuration = ?, feeType = ?, deviceRequired = ?, previousCodingExperience = ?, skillLevel = ?, skillAssessment = ?, status = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`,
+    [student_id || null, studentName, grade, school, parentName, mobileNumber, course_id || null, courseName, batch, joiningDate, courseDuration, feeType, deviceRequired ? 1 : 0, previousCodingExperience, Number(skillLevel || 0), skillAssessment, status, new Date().toISOString(), req.params.id, currentTenantId(req)]
   );
   res.json(normalizeAiLabStudent(await get(`SELECT * FROM ai_lab_students WHERE id = ?`, [req.params.id])));
 });
 
 router.delete('/api/ai-lab/students/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM ai_lab_attendance WHERE ai_lab_student_id = ?`, [req.params.id]);
-  await run(`DELETE FROM ai_lab_device_allocations WHERE ai_lab_student_id = ?`, [req.params.id]);
-  await run(`DELETE FROM ai_lab_projects WHERE ai_lab_student_id = ?`, [req.params.id]);
-  await run(`DELETE FROM ai_lab_assignments WHERE ai_lab_student_id = ?`, [req.params.id]);
-  await run(`DELETE FROM ai_lab_mentor_feedback WHERE ai_lab_student_id = ?`, [req.params.id]);
-  await run(`DELETE FROM ai_lab_portfolios WHERE ai_lab_student_id = ?`, [req.params.id]);
-  await run(`DELETE FROM ai_lab_certificates WHERE ai_lab_student_id = ?`, [req.params.id]);
-  await run(`DELETE FROM ai_lab_students WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM ai_lab_students WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'AI Lab student not found' });
+  for (const table of ['ai_lab_attendance', 'ai_lab_device_allocations', 'ai_lab_projects', 'ai_lab_assignments', 'ai_lab_mentor_feedback', 'ai_lab_portfolios', 'ai_lab_certificates']) {
+    await run(`DELETE FROM ${table} WHERE ai_lab_student_id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  }
+  await run(`DELETE FROM ai_lab_students WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -3339,9 +3505,11 @@ router.get('/api/ai-lab/attendance', authMiddleware, requireTenant, async (req, 
   const rows = await all(
     `SELECT ai_lab_attendance.*, ai_lab_students.studentName, ai_lab_courses.courseName
      FROM ai_lab_attendance
-     LEFT JOIN ai_lab_students ON ai_lab_students.id = ai_lab_attendance.ai_lab_student_id
-     LEFT JOIN ai_lab_courses ON ai_lab_courses.id = ai_lab_attendance.course_id
+     LEFT JOIN ai_lab_students ON ai_lab_students.id = ai_lab_attendance.ai_lab_student_id AND ai_lab_students.tenant_id = ai_lab_attendance.tenant_id
+     LEFT JOIN ai_lab_courses ON ai_lab_courses.id = ai_lab_attendance.course_id AND ai_lab_courses.tenant_id = ai_lab_attendance.tenant_id
+     WHERE ai_lab_attendance.tenant_id = ?
      ORDER BY ai_lab_attendance.date DESC, ai_lab_attendance.id DESC`
+    , [currentTenantId(req)]
   );
   res.json(rows.map((row) => normalizeAiLabBooleanRow(row, ['assignmentGiven'])));
 });
@@ -3350,27 +3518,32 @@ router.post('/api/ai-lab/attendance', authMiddleware, requireTenant, async (req,
   const { ai_lab_student_id, course_id, date, sessionType = 'Practical', mentor_id, mentorName, status = 'Present', deviceUsed, topicPracticed, assignmentGiven = false, parentAlert = 'Not Sent', remarks } = req.body;
   const validationError = requireFields(req.body, ['ai_lab_student_id', 'date', 'status']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (!(await get(`SELECT id FROM ai_lab_students WHERE id = ? AND tenant_id = ?`, [ai_lab_student_id, currentTenantId(req)]))) return res.status(404).json({ error: 'AI Lab student not found' });
   const result = await run(
-    `INSERT INTO ai_lab_attendance (ai_lab_student_id, course_id, date, sessionType, mentor_id, mentorName, status, deviceUsed, topicPracticed, assignmentGiven, parentAlert, remarks, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [ai_lab_student_id, course_id || null, date, sessionType, mentor_id || null, mentorName, status, deviceUsed, topicPracticed, assignmentGiven ? 1 : 0, parentAlert, remarks, new Date().toISOString()]
+    `INSERT INTO ai_lab_attendance (tenant_id, ai_lab_student_id, course_id, date, sessionType, mentor_id, mentorName, status, deviceUsed, topicPracticed, assignmentGiven, parentAlert, remarks, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), ai_lab_student_id, course_id || null, date, sessionType, mentor_id || null, mentorName, status, deviceUsed, topicPracticed, assignmentGiven ? 1 : 0, parentAlert, remarks, new Date().toISOString()]
   );
   res.json(normalizeAiLabBooleanRow(await get(`SELECT * FROM ai_lab_attendance WHERE id = ?`, [result.lastID]), ['assignmentGiven']));
 });
 
 router.delete('/api/ai-lab/attendance/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM ai_lab_attendance WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM ai_lab_attendance WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'AI Lab attendance not found' });
+  await run(`DELETE FROM ai_lab_attendance WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.get('/api/ai-lab/devices', authMiddleware, requireTenant, async (req, res) => {
-  const devices = await all(`SELECT * FROM ai_lab_devices ORDER BY deviceId ASC`);
+  const devices = await all(`SELECT * FROM ai_lab_devices WHERE tenant_id = ? ORDER BY deviceId ASC`, [currentTenantId(req)]);
   const allocations = await all(
     `SELECT ai_lab_device_allocations.*, ai_lab_devices.deviceId, ai_lab_devices.deviceType, ai_lab_students.studentName
      FROM ai_lab_device_allocations
-     LEFT JOIN ai_lab_devices ON ai_lab_devices.id = ai_lab_device_allocations.device_id
-     LEFT JOIN ai_lab_students ON ai_lab_students.id = ai_lab_device_allocations.ai_lab_student_id
+     LEFT JOIN ai_lab_devices ON ai_lab_devices.id = ai_lab_device_allocations.device_id AND ai_lab_devices.tenant_id = ai_lab_device_allocations.tenant_id
+     LEFT JOIN ai_lab_students ON ai_lab_students.id = ai_lab_device_allocations.ai_lab_student_id AND ai_lab_students.tenant_id = ai_lab_device_allocations.tenant_id
+     WHERE ai_lab_device_allocations.tenant_id = ?
      ORDER BY ai_lab_device_allocations.date DESC, ai_lab_device_allocations.id DESC`
+    , [currentTenantId(req)]
   );
   res.json({ devices, allocations: allocations.map((row) => normalizeAiLabBooleanRow(row, ['damageReported', 'mentorVerified'])) });
 });
@@ -3381,8 +3554,8 @@ router.post('/api/ai-lab/devices', authMiddleware, requireTenant, async (req, re
   if (validationError) return res.status(400).json({ error: validationError });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO ai_lab_devices (deviceId, deviceType, name, branch, condition, status, purchaseDate, notes, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [deviceId, deviceType, name, branch, condition, status, purchaseDate, notes, now, now]
+    `INSERT INTO ai_lab_devices (tenant_id, deviceId, deviceType, name, branch, condition, status, purchaseDate, notes, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), deviceId, deviceType, name, branch, condition, status, purchaseDate, notes, now, now]
   );
   res.json(await get(`SELECT * FROM ai_lab_devices WHERE id = ?`, [result.lastID]));
 });
@@ -3391,23 +3564,29 @@ router.post('/api/ai-lab/device-allocations', authMiddleware, requireTenant, asy
   const { device_id, ai_lab_student_id, course_id, date, sessionTime, conditionBefore = 'Working', conditionAfter = 'Working', damageReported = false, mentorVerified = false, remarks } = req.body;
   const validationError = requireFields(req.body, ['device_id', 'ai_lab_student_id', 'date']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (!(await get(`SELECT id FROM ai_lab_devices WHERE id = ? AND tenant_id = ?`, [device_id, currentTenantId(req)]))) return res.status(404).json({ error: 'AI Lab device not found' });
+  if (!(await get(`SELECT id FROM ai_lab_students WHERE id = ? AND tenant_id = ?`, [ai_lab_student_id, currentTenantId(req)]))) return res.status(404).json({ error: 'AI Lab student not found' });
   const result = await run(
-    `INSERT INTO ai_lab_device_allocations (device_id, ai_lab_student_id, course_id, date, sessionTime, conditionBefore, conditionAfter, damageReported, mentorVerified, remarks, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [device_id, ai_lab_student_id, course_id || null, date, sessionTime, conditionBefore, conditionAfter, damageReported ? 1 : 0, mentorVerified ? 1 : 0, remarks, new Date().toISOString()]
+    `INSERT INTO ai_lab_device_allocations (tenant_id, device_id, ai_lab_student_id, course_id, date, sessionTime, conditionBefore, conditionAfter, damageReported, mentorVerified, remarks, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), device_id, ai_lab_student_id, course_id || null, date, sessionTime, conditionBefore, conditionAfter, damageReported ? 1 : 0, mentorVerified ? 1 : 0, remarks, new Date().toISOString()]
   );
   await run(`UPDATE ai_lab_devices SET status = ?, updatedAt = ? WHERE id = ?`, ['In Use', new Date().toISOString(), device_id]);
   res.json(normalizeAiLabBooleanRow(await get(`SELECT * FROM ai_lab_device_allocations WHERE id = ?`, [result.lastID]), ['damageReported', 'mentorVerified']));
 });
 
 router.delete('/api/ai-lab/devices/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM ai_lab_device_allocations WHERE device_id = ?`, [req.params.id]);
-  await run(`DELETE FROM ai_lab_devices WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM ai_lab_devices WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'AI Lab device not found' });
+  await run(`DELETE FROM ai_lab_device_allocations WHERE device_id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  await run(`DELETE FROM ai_lab_devices WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.delete('/api/ai-lab/device-allocations/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM ai_lab_device_allocations WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM ai_lab_device_allocations WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'AI Lab device allocation not found' });
+  await run(`DELETE FROM ai_lab_device_allocations WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -3415,10 +3594,12 @@ router.get('/api/ai-lab/projects', authMiddleware, requireTenant, async (req, re
   const rows = await all(
     `SELECT ai_lab_projects.*, ai_lab_students.studentName, ai_lab_courses.courseName, teachers.name AS mentorName
      FROM ai_lab_projects
-     LEFT JOIN ai_lab_students ON ai_lab_students.id = ai_lab_projects.ai_lab_student_id
-     LEFT JOIN ai_lab_courses ON ai_lab_courses.id = ai_lab_projects.course_id
-     LEFT JOIN teachers ON teachers.id = ai_lab_projects.mentor_id
+     LEFT JOIN ai_lab_students ON ai_lab_students.id = ai_lab_projects.ai_lab_student_id AND ai_lab_students.tenant_id = ai_lab_projects.tenant_id
+     LEFT JOIN ai_lab_courses ON ai_lab_courses.id = ai_lab_projects.course_id AND ai_lab_courses.tenant_id = ai_lab_projects.tenant_id
+     LEFT JOIN teachers ON teachers.id = ai_lab_projects.mentor_id AND teachers.tenant_id = ai_lab_projects.tenant_id
+     WHERE ai_lab_projects.tenant_id = ?
      ORDER BY ai_lab_projects.updatedAt DESC, ai_lab_projects.id DESC`
+    , [currentTenantId(req)]
   );
   res.json(rows.map((row) => normalizeAiLabBooleanRow(row)));
 });
@@ -3427,17 +3608,20 @@ router.post('/api/ai-lab/projects', authMiddleware, requireTenant, async (req, r
   const { ai_lab_student_id, course_id, mentor_id, projectName, projectType = 'Mini Project', startDate, deadline, status = 'Idea Stage', githubLink, demoVideo, finalScore = 0, finalDemoStatus = 'Pending', remarks } = req.body;
   const validationError = requireFields(req.body, ['ai_lab_student_id', 'projectName']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (!(await get(`SELECT id FROM ai_lab_students WHERE id = ? AND tenant_id = ?`, [ai_lab_student_id, currentTenantId(req)]))) return res.status(404).json({ error: 'AI Lab student not found' });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO ai_lab_projects (ai_lab_student_id, course_id, mentor_id, projectName, projectType, startDate, deadline, status, githubLink, demoVideo, finalScore, finalDemoStatus, remarks, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [ai_lab_student_id, course_id || null, mentor_id || null, projectName, projectType, startDate, deadline, status, githubLink, demoVideo, Number(finalScore || 0), finalDemoStatus, remarks, now, now]
+    `INSERT INTO ai_lab_projects (tenant_id, ai_lab_student_id, course_id, mentor_id, projectName, projectType, startDate, deadline, status, githubLink, demoVideo, finalScore, finalDemoStatus, remarks, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), ai_lab_student_id, course_id || null, mentor_id || null, projectName, projectType, startDate, deadline, status, githubLink, demoVideo, Number(finalScore || 0), finalDemoStatus, remarks, now, now]
   );
   res.json(normalizeAiLabBooleanRow(await get(`SELECT * FROM ai_lab_projects WHERE id = ?`, [result.lastID])));
 });
 
 router.delete('/api/ai-lab/projects/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM ai_lab_projects WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM ai_lab_projects WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'AI Lab project not found' });
+  await run(`DELETE FROM ai_lab_projects WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -3445,9 +3629,11 @@ router.get('/api/ai-lab/assignments', authMiddleware, requireTenant, async (req,
   const rows = await all(
     `SELECT ai_lab_assignments.*, ai_lab_students.studentName, ai_lab_courses.courseName
      FROM ai_lab_assignments
-     LEFT JOIN ai_lab_students ON ai_lab_students.id = ai_lab_assignments.ai_lab_student_id
-     LEFT JOIN ai_lab_courses ON ai_lab_courses.id = ai_lab_assignments.course_id
+     LEFT JOIN ai_lab_students ON ai_lab_students.id = ai_lab_assignments.ai_lab_student_id AND ai_lab_students.tenant_id = ai_lab_assignments.tenant_id
+     LEFT JOIN ai_lab_courses ON ai_lab_courses.id = ai_lab_assignments.course_id AND ai_lab_courses.tenant_id = ai_lab_assignments.tenant_id
+     WHERE ai_lab_assignments.tenant_id = ?
      ORDER BY ai_lab_assignments.dueDate DESC, ai_lab_assignments.id DESC`
+    , [currentTenantId(req)]
   );
   res.json(rows.map((row) => normalizeAiLabBooleanRow(row, ['fileUploaded'])));
 });
@@ -3456,17 +3642,20 @@ router.post('/api/ai-lab/assignments', authMiddleware, requireTenant, async (req
   const { ai_lab_student_id, course_id, assignmentName, assignmentType = 'Code File', dueDate, submissionDate, fileUploaded = false, githubLink, mentorFeedback, score = 0, status = 'Assigned' } = req.body;
   const validationError = requireFields(req.body, ['ai_lab_student_id', 'assignmentName']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (!(await get(`SELECT id FROM ai_lab_students WHERE id = ? AND tenant_id = ?`, [ai_lab_student_id, currentTenantId(req)]))) return res.status(404).json({ error: 'AI Lab student not found' });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO ai_lab_assignments (ai_lab_student_id, course_id, assignmentName, assignmentType, dueDate, submissionDate, fileUploaded, githubLink, mentorFeedback, score, status, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [ai_lab_student_id, course_id || null, assignmentName, assignmentType, dueDate, submissionDate, fileUploaded ? 1 : 0, githubLink, mentorFeedback, Number(score || 0), status, now, now]
+    `INSERT INTO ai_lab_assignments (tenant_id, ai_lab_student_id, course_id, assignmentName, assignmentType, dueDate, submissionDate, fileUploaded, githubLink, mentorFeedback, score, status, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), ai_lab_student_id, course_id || null, assignmentName, assignmentType, dueDate, submissionDate, fileUploaded ? 1 : 0, githubLink, mentorFeedback, Number(score || 0), status, now, now]
   );
   res.json(normalizeAiLabBooleanRow(await get(`SELECT * FROM ai_lab_assignments WHERE id = ?`, [result.lastID]), ['fileUploaded']));
 });
 
 router.delete('/api/ai-lab/assignments/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM ai_lab_assignments WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM ai_lab_assignments WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'AI Lab assignment not found' });
+  await run(`DELETE FROM ai_lab_assignments WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -3474,10 +3663,12 @@ router.get('/api/ai-lab/feedback', authMiddleware, requireTenant, async (req, re
   const rows = await all(
     `SELECT ai_lab_mentor_feedback.*, ai_lab_students.studentName, ai_lab_courses.courseName, teachers.name AS mentorName
      FROM ai_lab_mentor_feedback
-     LEFT JOIN ai_lab_students ON ai_lab_students.id = ai_lab_mentor_feedback.ai_lab_student_id
-     LEFT JOIN ai_lab_courses ON ai_lab_courses.id = ai_lab_mentor_feedback.course_id
-     LEFT JOIN teachers ON teachers.id = ai_lab_mentor_feedback.mentor_id
+     LEFT JOIN ai_lab_students ON ai_lab_students.id = ai_lab_mentor_feedback.ai_lab_student_id AND ai_lab_students.tenant_id = ai_lab_mentor_feedback.tenant_id
+     LEFT JOIN ai_lab_courses ON ai_lab_courses.id = ai_lab_mentor_feedback.course_id AND ai_lab_courses.tenant_id = ai_lab_mentor_feedback.tenant_id
+     LEFT JOIN teachers ON teachers.id = ai_lab_mentor_feedback.mentor_id AND teachers.tenant_id = ai_lab_mentor_feedback.tenant_id
+     WHERE ai_lab_mentor_feedback.tenant_id = ?
      ORDER BY ai_lab_mentor_feedback.date DESC, ai_lab_mentor_feedback.id DESC`
+    , [currentTenantId(req)]
   );
   res.json(rows.map((row) => normalizeAiLabBooleanRow(row)));
 });
@@ -3486,17 +3677,20 @@ router.post('/api/ai-lab/feedback', authMiddleware, requireTenant, async (req, r
   const { ai_lab_student_id, course_id, mentor_id, date, logic = 0, coding = 0, debugging = 0, creativity = 0, presentation = 0, discipline = 0, independence = 0, projectWork = 0, remarks } = req.body;
   const validationError = requireFields(req.body, ['ai_lab_student_id', 'date']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (!(await get(`SELECT id FROM ai_lab_students WHERE id = ? AND tenant_id = ?`, [ai_lab_student_id, currentTenantId(req)]))) return res.status(404).json({ error: 'AI Lab student not found' });
   const totalScore = [logic, coding, debugging, creativity, presentation, discipline, independence, projectWork].reduce((sum, value) => sum + Number(value || 0), 0);
   const result = await run(
-    `INSERT INTO ai_lab_mentor_feedback (ai_lab_student_id, course_id, mentor_id, date, logic, coding, debugging, creativity, presentation, discipline, independence, projectWork, totalScore, remarks, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [ai_lab_student_id, course_id || null, mentor_id || null, date, Number(logic), Number(coding), Number(debugging), Number(creativity), Number(presentation), Number(discipline), Number(independence), Number(projectWork), totalScore, remarks, new Date().toISOString()]
+    `INSERT INTO ai_lab_mentor_feedback (tenant_id, ai_lab_student_id, course_id, mentor_id, date, logic, coding, debugging, creativity, presentation, discipline, independence, projectWork, totalScore, remarks, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), ai_lab_student_id, course_id || null, mentor_id || null, date, Number(logic), Number(coding), Number(debugging), Number(creativity), Number(presentation), Number(discipline), Number(independence), Number(projectWork), totalScore, remarks, new Date().toISOString()]
   );
   res.json(normalizeAiLabBooleanRow(await get(`SELECT * FROM ai_lab_mentor_feedback WHERE id = ?`, [result.lastID])));
 });
 
 router.delete('/api/ai-lab/feedback/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM ai_lab_mentor_feedback WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM ai_lab_mentor_feedback WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'AI Lab feedback not found' });
+  await run(`DELETE FROM ai_lab_mentor_feedback WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -3504,8 +3698,10 @@ router.get('/api/ai-lab/portfolios', authMiddleware, requireTenant, async (req, 
   const rows = await all(
     `SELECT ai_lab_portfolios.*, ai_lab_students.studentName
      FROM ai_lab_portfolios
-     LEFT JOIN ai_lab_students ON ai_lab_students.id = ai_lab_portfolios.ai_lab_student_id
+     LEFT JOIN ai_lab_students ON ai_lab_students.id = ai_lab_portfolios.ai_lab_student_id AND ai_lab_students.tenant_id = ai_lab_portfolios.tenant_id
+     WHERE ai_lab_portfolios.tenant_id = ?
      ORDER BY ai_lab_portfolios.updatedAt DESC, ai_lab_portfolios.id DESC`
+    , [currentTenantId(req)]
   );
   res.json(rows);
 });
@@ -3514,17 +3710,20 @@ router.post('/api/ai-lab/portfolios', authMiddleware, requireTenant, async (req,
   const { ai_lab_student_id, githubUsername, projectRepository, demoVideo, portfolioPage, certificateLink, linkedinProfile, status = 'Pending' } = req.body;
   const validationError = requireFields(req.body, ['ai_lab_student_id']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (!(await get(`SELECT id FROM ai_lab_students WHERE id = ? AND tenant_id = ?`, [ai_lab_student_id, currentTenantId(req)]))) return res.status(404).json({ error: 'AI Lab student not found' });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO ai_lab_portfolios (ai_lab_student_id, githubUsername, projectRepository, demoVideo, portfolioPage, certificateLink, linkedinProfile, status, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [ai_lab_student_id, githubUsername, projectRepository, demoVideo, portfolioPage, certificateLink, linkedinProfile, status, now, now]
+    `INSERT INTO ai_lab_portfolios (tenant_id, ai_lab_student_id, githubUsername, projectRepository, demoVideo, portfolioPage, certificateLink, linkedinProfile, status, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), ai_lab_student_id, githubUsername, projectRepository, demoVideo, portfolioPage, certificateLink, linkedinProfile, status, now, now]
   );
   res.json(await get(`SELECT * FROM ai_lab_portfolios WHERE id = ?`, [result.lastID]));
 });
 
 router.delete('/api/ai-lab/portfolios/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM ai_lab_portfolios WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM ai_lab_portfolios WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'AI Lab portfolio not found' });
+  await run(`DELETE FROM ai_lab_portfolios WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -3532,9 +3731,11 @@ router.get('/api/ai-lab/certificates', authMiddleware, requireTenant, async (req
   const rows = await all(
     `SELECT ai_lab_certificates.*, ai_lab_students.studentName, ai_lab_courses.courseName
      FROM ai_lab_certificates
-     LEFT JOIN ai_lab_students ON ai_lab_students.id = ai_lab_certificates.ai_lab_student_id
-     LEFT JOIN ai_lab_courses ON ai_lab_courses.id = ai_lab_certificates.course_id
+     LEFT JOIN ai_lab_students ON ai_lab_students.id = ai_lab_certificates.ai_lab_student_id AND ai_lab_students.tenant_id = ai_lab_certificates.tenant_id
+     LEFT JOIN ai_lab_courses ON ai_lab_courses.id = ai_lab_certificates.course_id AND ai_lab_courses.tenant_id = ai_lab_certificates.tenant_id
+     WHERE ai_lab_certificates.tenant_id = ?
      ORDER BY ai_lab_certificates.issueDate DESC, ai_lab_certificates.id DESC`
+    , [currentTenantId(req)]
   );
   res.json(rows);
 });
@@ -3543,18 +3744,22 @@ router.post('/api/ai-lab/certificates', authMiddleware, requireTenant, async (re
   const { ai_lab_student_id, course_id, projectName, issueDate, directorSignature = 'Yes', qrVerification = 'Yes', status = 'Pending' } = req.body;
   const validationError = requireFields(req.body, ['ai_lab_student_id', 'course_id']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (!(await get(`SELECT id FROM ai_lab_students WHERE id = ? AND tenant_id = ?`, [ai_lab_student_id, currentTenantId(req)]))) return res.status(404).json({ error: 'AI Lab student not found' });
+  if (!(await get(`SELECT id FROM ai_lab_courses WHERE id = ? AND tenant_id = ?`, [course_id, currentTenantId(req)]))) return res.status(404).json({ error: 'AI Lab course not found' });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO ai_lab_certificates (ai_lab_student_id, course_id, certificateId, projectName, issueDate, directorSignature, qrVerification, status, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [ai_lab_student_id, course_id, `PENDING-${Date.now()}`, projectName, issueDate, directorSignature, qrVerification, status, now, now]
+    `INSERT INTO ai_lab_certificates (tenant_id, ai_lab_student_id, course_id, certificateId, projectName, issueDate, directorSignature, qrVerification, status, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), ai_lab_student_id, course_id, `PENDING-${Date.now()}`, projectName, issueDate, directorSignature, qrVerification, status, now, now]
   );
   await run(`UPDATE ai_lab_certificates SET certificateId = ? WHERE id = ?`, [makeAiLabCertificateId(result.lastID), result.lastID]);
   res.json(await get(`SELECT * FROM ai_lab_certificates WHERE id = ?`, [result.lastID]));
 });
 
 router.delete('/api/ai-lab/certificates/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM ai_lab_certificates WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM ai_lab_certificates WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'AI Lab certificate not found' });
+  await run(`DELETE FROM ai_lab_certificates WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -3792,7 +3997,7 @@ router.delete('/api/academic/homework/:id', authMiddleware, requireTenant, requi
 });
 
 router.get('/api/academic/tests', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM test_calendars ORDER BY date DESC, id DESC`);
+  const rows = await all(`SELECT * FROM test_calendars WHERE tenant_id = ? ORDER BY date DESC, id DESC`, [currentTenantId(req)]);
   res.json(rows.map((row) => normalizeAcademic(row, ['analysisRequired'], ['totalMarks'])));
 });
 
@@ -3802,15 +4007,17 @@ router.post('/api/academic/tests', authMiddleware, requireTenant, async (req, re
   if (validationError) return res.status(400).json({ error: validationError });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO test_calendars (testName, date, courseName, batchName, subjects, syllabusCovered, totalMarks, duration, resultDate, analysisRequired, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [testName, date, courseName, batchName, subjects, syllabusCovered, Number(totalMarks || 0), duration, resultDate, analysisRequired ? 1 : 0, status, now, now]
+    `INSERT INTO test_calendars (tenant_id, testName, date, courseName, batchName, subjects, syllabusCovered, totalMarks, duration, resultDate, analysisRequired, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), testName, date, courseName, batchName, subjects, syllabusCovered, Number(totalMarks || 0), duration, resultDate, analysisRequired ? 1 : 0, status, now, now]
   );
-  res.json(normalizeAcademic(await get(`SELECT * FROM test_calendars WHERE id = ?`, [result.lastID]), ['analysisRequired'], ['totalMarks']));
+  res.json(normalizeAcademic(await get(`SELECT * FROM test_calendars WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]), ['analysisRequired'], ['totalMarks']));
 });
 
 router.delete('/api/academic/tests/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM student_test_results WHERE test_id = ?`, [req.params.id]);
-  await run(`DELETE FROM test_calendars WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM test_calendars WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Academic test not found' });
+  await run(`DELETE FROM student_test_results WHERE test_id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  await run(`DELETE FROM test_calendars WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -3818,8 +4025,10 @@ router.get('/api/academic/test-results', authMiddleware, requireTenant, async (r
   const rows = await all(
     `SELECT student_test_results.*, test_calendars.testName
      FROM student_test_results
-     LEFT JOIN test_calendars ON test_calendars.id = student_test_results.test_id
+     LEFT JOIN test_calendars ON test_calendars.id = student_test_results.test_id AND test_calendars.tenant_id = student_test_results.tenant_id
+     WHERE student_test_results.tenant_id = ?
      ORDER BY student_test_results.updatedAt DESC, student_test_results.id DESC`
+    , [currentTenantId(req)]
   );
   res.json(rows.map((row) => normalizeAcademic(row, [], ['marksObtained', 'totalMarks', 'testRank', 'accuracy'])));
 });
@@ -3828,6 +4037,14 @@ router.post('/api/academic/test-results', authMiddleware, requireTenant, async (
   const { test_id, student_id, studentName, batchName, subject, marksObtained = 0, totalMarks = 0, testRank, accuracy, weakChapter, actionNeeded } = req.body;
   const validationError = requireFields(req.body, ['studentName', 'subject']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (test_id) {
+    const ownedTest = await get(`SELECT id FROM test_calendars WHERE id = ? AND tenant_id = ?`, [test_id, currentTenantId(req)]);
+    if (!ownedTest) return res.status(404).json({ error: 'Academic test not found' });
+  }
+  if (student_id) {
+    const ownedStudent = await get(`SELECT id FROM students WHERE id = ? AND tenant_id = ?`, [student_id, currentTenantId(req)]);
+    if (!ownedStudent) return res.status(404).json({ error: 'Student not found' });
+  }
   const computedAccuracy = accuracy === undefined && Number(totalMarks || 0) ? Math.round((Number(marksObtained || 0) / Number(totalMarks || 0)) * 100) : Number(accuracy || 0);
   const now = new Date().toISOString();
   const result = await run(
@@ -3839,7 +4056,7 @@ router.post('/api/academic/test-results', authMiddleware, requireTenant, async (
       Number(totalMarks || 0), testRank || null, computedAccuracy, weakChapter, actionNeeded, now, now,
       currentTenantId(req)]
   );
-  const createdResult = normalizeAcademic(await get(`SELECT * FROM student_test_results WHERE id = ?`, [result.lastID]), [], ['marksObtained', 'totalMarks', 'testRank', 'accuracy']);
+  const createdResult = normalizeAcademic(await get(`SELECT * FROM student_test_results WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]), [], ['marksObtained', 'totalMarks', 'testRank', 'accuracy']);
   let officialWhatsApp = null;
   if (req.body.sendParentUpdate && student_id) {
     try {
@@ -3856,12 +4073,14 @@ router.post('/api/academic/test-results', authMiddleware, requireTenant, async (
 });
 
 router.delete('/api/academic/test-results/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM student_test_results WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM student_test_results WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Academic test result not found' });
+  await run(`DELETE FROM student_test_results WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.get('/api/academic/doubt-sessions', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM doubt_sessions ORDER BY date DESC, id DESC`);
+  const rows = await all(`SELECT * FROM doubt_sessions WHERE tenant_id = ? ORDER BY date DESC, id DESC`, [currentTenantId(req)]);
   res.json(rows.map((row) => normalizeAcademic(row, ['improvementChecked'], ['studentsAssigned'])));
 });
 
@@ -3869,6 +4088,10 @@ router.post('/api/academic/doubt-sessions', authMiddleware, requireTenant, async
   const { date, batchName, subject, topic, teacher_id, teacherName, studentsAssigned = 0, reason, sessionType = 'Weekly Doubt', status = 'Scheduled', improvementChecked = false } = req.body;
   const validationError = requireFields(req.body, ['date', 'batchName', 'subject', 'topic']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (teacher_id) {
+    const ownedTeacher = await get(`SELECT id FROM teachers WHERE id = ? AND tenant_id = ?`, [teacher_id, currentTenantId(req)]);
+    if (!ownedTeacher) return res.status(404).json({ error: 'Teacher not found' });
+  }
   const now = new Date().toISOString();
   const result = await run(
     `INSERT INTO doubt_sessions
@@ -3880,16 +4103,18 @@ router.post('/api/academic/doubt-sessions', authMiddleware, requireTenant, async
       reason, sessionType, status, improvementChecked ? 1 : 0, now, now, currentTenantId(req), date,
       Number(studentsAssigned || 0), improvementChecked ? Number(studentsAssigned || 0) : 0]
   );
-  res.json(normalizeAcademic(await get(`SELECT * FROM doubt_sessions WHERE id = ?`, [result.lastID]), ['improvementChecked'], ['studentsAssigned']));
+  res.json(normalizeAcademic(await get(`SELECT * FROM doubt_sessions WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]), ['improvementChecked'], ['studentsAssigned']));
 });
 
 router.delete('/api/academic/doubt-sessions/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM doubt_sessions WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM doubt_sessions WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Doubt session not found' });
+  await run(`DELETE FROM doubt_sessions WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.get('/api/academic/revision-plans', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM revision_plans ORDER BY revisionDate DESC, id DESC`);
+  const rows = await all(`SELECT * FROM revision_plans WHERE tenant_id = ? ORDER BY revisionDate DESC, id DESC`, [currentTenantId(req)]);
   res.json(rows.map((row) => normalizeAcademic(row, ['testAfterRevision'])));
 });
 
@@ -3897,21 +4122,27 @@ router.post('/api/academic/revision-plans', authMiddleware, requireTenant, async
   const { revisionDate, batchName, subject, chapter, teacher_id, teacherName, revisionType = 'Chapter Revision', material, testAfterRevision = false, status = 'Planned' } = req.body;
   const validationError = requireFields(req.body, ['revisionDate', 'batchName', 'subject', 'chapter']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (teacher_id) {
+    const ownedTeacher = await get(`SELECT id FROM teachers WHERE id = ? AND tenant_id = ?`, [teacher_id, currentTenantId(req)]);
+    if (!ownedTeacher) return res.status(404).json({ error: 'Teacher not found' });
+  }
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO revision_plans (revisionDate, batchName, subject, chapter, teacher_id, teacherName, revisionType, material, testAfterRevision, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [revisionDate, batchName, subject, chapter, teacher_id || null, teacherName, revisionType, material, testAfterRevision ? 1 : 0, status, now, now]
+    `INSERT INTO revision_plans (tenant_id, revisionDate, batchName, subject, chapter, teacher_id, teacherName, revisionType, material, testAfterRevision, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), revisionDate, batchName, subject, chapter, teacher_id || null, teacherName, revisionType, material, testAfterRevision ? 1 : 0, status, now, now]
   );
-  res.json(normalizeAcademic(await get(`SELECT * FROM revision_plans WHERE id = ?`, [result.lastID]), ['testAfterRevision']));
+  res.json(normalizeAcademic(await get(`SELECT * FROM revision_plans WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]), ['testAfterRevision']));
 });
 
 router.delete('/api/academic/revision-plans/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM revision_plans WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM revision_plans WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Revision plan not found' });
+  await run(`DELETE FROM revision_plans WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.get('/api/academic/remedial-actions', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM remedial_actions ORDER BY deadline ASC, id DESC`);
+  const rows = await all(`SELECT * FROM remedial_actions WHERE tenant_id = ? ORDER BY deadline ASC, id DESC`, [currentTenantId(req)]);
   res.json(rows.map((row) => normalizeAcademic(row, ['followUpTest'])));
 });
 
@@ -3919,16 +4150,22 @@ router.post('/api/academic/remedial-actions', authMiddleware, requireTenant, asy
   const { targetType = 'Student', targetName, student_id, batchName, issue, reason, action, assignedTeacher, deadline, followUpTest = false, status = 'Open' } = req.body;
   const validationError = requireFields(req.body, ['targetName', 'issue', 'action']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (student_id) {
+    const ownedStudent = await get(`SELECT id FROM students WHERE id = ? AND tenant_id = ?`, [student_id, currentTenantId(req)]);
+    if (!ownedStudent) return res.status(404).json({ error: 'Student not found' });
+  }
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO remedial_actions (targetType, targetName, student_id, batchName, issue, reason, action, assignedTeacher, deadline, followUpTest, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [targetType, targetName, student_id || null, batchName, issue, reason, action, assignedTeacher, deadline, followUpTest ? 1 : 0, status, now, now]
+    `INSERT INTO remedial_actions (tenant_id, targetType, targetName, student_id, batchName, issue, reason, action, assignedTeacher, deadline, followUpTest, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), targetType, targetName, student_id || null, batchName, issue, reason, action, assignedTeacher, deadline, followUpTest ? 1 : 0, status, now, now]
   );
-  res.json(normalizeAcademic(await get(`SELECT * FROM remedial_actions WHERE id = ?`, [result.lastID]), ['followUpTest']));
+  res.json(normalizeAcademic(await get(`SELECT * FROM remedial_actions WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]), ['followUpTest']));
 });
 
 router.delete('/api/academic/remedial-actions/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM remedial_actions WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM remedial_actions WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Remedial action not found' });
+  await run(`DELETE FROM remedial_actions WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -3948,23 +4185,23 @@ function normalizePerformance(row, booleanFields = [], numberFields = []) {
   return normalized;
 }
 
-async function recalculatePerformanceRanks(testId) {
-  const rows = await all(`SELECT * FROM performance_results WHERE test_id = ? ORDER BY marksObtained DESC, accuracy DESC, id ASC`, [testId]);
+async function recalculatePerformanceRanks(testId, tenantId) {
+  const rows = await all(`SELECT * FROM performance_results WHERE test_id = ? AND tenant_id = ? ORDER BY marksObtained DESC, accuracy DESC, id ASC`, [testId, tenantId]);
   for (const [index, row] of rows.entries()) {
     const overallRank = index + 1;
     const batchRank = rows.filter((item) => item.batchName === row.batchName && (Number(item.marksObtained || 0) > Number(row.marksObtained || 0) || (Number(item.marksObtained || 0) === Number(row.marksObtained || 0) && Number(item.id) < Number(row.id)))).length + 1;
     const branchRank = rows.filter((item) => item.branch === row.branch && (Number(item.marksObtained || 0) > Number(row.marksObtained || 0) || (Number(item.marksObtained || 0) === Number(row.marksObtained || 0) && Number(item.id) < Number(row.id)))).length + 1;
     const courseRank = rows.filter((item) => item.courseName === row.courseName && (Number(item.marksObtained || 0) > Number(row.marksObtained || 0) || (Number(item.marksObtained || 0) === Number(row.marksObtained || 0) && Number(item.id) < Number(row.id)))).length + 1;
-    await run(`UPDATE performance_results SET overallRank = ?, batchRank = ?, branchRank = ?, courseRank = ?, updatedAt = ? WHERE id = ?`, [overallRank, batchRank, branchRank, courseRank, new Date().toISOString(), row.id]);
+    await run(`UPDATE performance_results SET overallRank = ?, batchRank = ?, branchRank = ?, courseRank = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`, [overallRank, batchRank, branchRank, courseRank, new Date().toISOString(), row.id, tenantId]);
   }
 }
 
-async function performanceDashboard() {
-  const tests = await all(`SELECT * FROM performance_tests`);
-  const results = await all(`SELECT * FROM performance_results`);
-  const remedials = await all(`SELECT * FROM remedial_students`);
-  const parentReports = await all(`SELECT * FROM parent_report_logs`);
-  const omrRows = await all(`SELECT * FROM omr_uploads`);
+async function performanceDashboard(tenantId) {
+  const tests = await all(`SELECT * FROM performance_tests WHERE tenant_id = ?`, [tenantId]);
+  const results = await all(`SELECT * FROM performance_results WHERE tenant_id = ?`, [tenantId]);
+  const remedials = await all(`SELECT * FROM remedial_students WHERE tenant_id = ?`, [tenantId]);
+  const parentReports = await all(`SELECT * FROM parent_report_logs WHERE tenant_id = ?`, [tenantId]);
+  const omrRows = await all(`SELECT * FROM omr_uploads WHERE tenant_id = ?`, [tenantId]);
   const present = results.filter((row) => row.status === 'Present');
   const totalMarks = present.reduce((sum, row) => sum + Number(row.totalMarks || 0), 0);
   const scored = present.reduce((sum, row) => sum + Number(row.marksObtained || 0), 0);
@@ -3996,11 +4233,11 @@ async function performanceDashboard() {
 }
 
 router.get('/api/test-performance/dashboard', authMiddleware, requireTenant, async (req, res) => {
-  res.json(await performanceDashboard());
+  res.json(await performanceDashboard(currentTenantId(req)));
 });
 
 router.get('/api/test-performance/tests', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM performance_tests ORDER BY testDate DESC, id DESC`);
+  const rows = await all(`SELECT * FROM performance_tests WHERE tenant_id = ? ORDER BY testDate DESC, id DESC`, [currentTenantId(req)]);
   res.json(rows.map((row) => normalizePerformance(row, ['negativeMarking'], ['totalQuestions', 'totalMarks'])));
 });
 
@@ -4010,22 +4247,21 @@ router.post('/api/test-performance/tests', authMiddleware, requireTenant, async 
   if (validationError) return res.status(400).json({ error: validationError });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO performance_tests (testCode, testName, testType, courseName, batchName, branch, subject, chapters, testDate, duration, totalQuestions, totalMarks, negativeMarking, testMode, resultDate, createdBy, status, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [`PENDING-${Date.now()}`, testName, testType, courseName, batchName, branch, subject, chapters, testDate, duration, Number(totalQuestions || 0), Number(totalMarks || 0), negativeMarking ? 1 : 0, testMode, resultDate, createdBy || req.user.username, status, now, now]
+    `INSERT INTO performance_tests (tenant_id, testCode, testName, testType, courseName, batchName, branch, subject, chapters, testDate, duration, totalQuestions, totalMarks, negativeMarking, testMode, resultDate, createdBy, status, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), `PENDING-${Date.now()}`, testName, testType, courseName, batchName, branch, subject, chapters, testDate, duration, Number(totalQuestions || 0), Number(totalMarks || 0), negativeMarking ? 1 : 0, testMode, resultDate, createdBy || req.user.username, status, now, now]
   );
-  await run(`UPDATE performance_tests SET testCode = ? WHERE id = ?`, [makePerformanceTestCode(result.lastID), result.lastID]);
-  res.json(normalizePerformance(await get(`SELECT * FROM performance_tests WHERE id = ?`, [result.lastID]), ['negativeMarking'], ['totalQuestions', 'totalMarks']));
+  await run(`UPDATE performance_tests SET testCode = ? WHERE id = ? AND tenant_id = ?`, [makePerformanceTestCode(result.lastID), result.lastID, currentTenantId(req)]);
+  res.json(normalizePerformance(await get(`SELECT * FROM performance_tests WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]), ['negativeMarking'], ['totalQuestions', 'totalMarks']));
 });
 
 router.delete('/api/test-performance/tests/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM performance_results WHERE test_id = ?`, [req.params.id]);
-  await run(`DELETE FROM question_analysis WHERE test_id = ?`, [req.params.id]);
-  await run(`DELETE FROM parent_report_logs WHERE test_id = ?`, [req.params.id]);
-  await run(`DELETE FROM teacher_result_impact WHERE test_id = ?`, [req.params.id]);
-  await run(`DELETE FROM remedial_students WHERE test_id = ?`, [req.params.id]);
-  await run(`DELETE FROM omr_uploads WHERE test_id = ?`, [req.params.id]);
-  await run(`DELETE FROM performance_tests WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM performance_tests WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Performance test not found' });
+  for (const table of ['performance_results', 'question_analysis', 'parent_report_logs', 'teacher_result_impact', 'remedial_students', 'omr_uploads']) {
+    await run(`DELETE FROM ${table} WHERE test_id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  }
+  await run(`DELETE FROM performance_tests WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
@@ -4033,8 +4269,10 @@ router.get('/api/test-performance/results', authMiddleware, requireTenant, async
   const rows = await all(
     `SELECT performance_results.*, performance_tests.testName
      FROM performance_results
-     LEFT JOIN performance_tests ON performance_tests.id = performance_results.test_id
+     LEFT JOIN performance_tests ON performance_tests.id = performance_results.test_id AND performance_tests.tenant_id = performance_results.tenant_id
+     WHERE performance_results.tenant_id = ?
      ORDER BY performance_results.test_id DESC, performance_results.overallRank ASC, performance_results.id DESC`
+    , [currentTenantId(req)]
   );
   res.json(rows.map((row) => normalizePerformance(row, ['parentReportSent'], ['physicsMarks', 'chemistryMarks', 'biologyMarks', 'mathsMarks', 'marksObtained', 'totalMarks', 'percentage', 'batchRank', 'branchRank', 'courseRank', 'overallRank', 'attemptedQuestions', 'correctAnswers', 'wrongAnswers', 'blankQuestions', 'accuracy'])));
 });
@@ -4043,36 +4281,43 @@ router.post('/api/test-performance/results', authMiddleware, requireTenant, asyn
   const { test_id, student_id, studentName, rollNumber, courseName, batchName, branch = 'Tembhurni', status = 'Present', physicsMarks = 0, chemistryMarks = 0, biologyMarks = 0, mathsMarks = 0, marksObtained, totalMarks = 0, attemptedQuestions = 0, correctAnswers = 0, wrongAnswers = 0, blankQuestions = 0, strongSubject, weakSubject, weakChapter, suggestedAction, teacherRemark } = req.body;
   const validationError = requireFields(req.body, ['test_id', 'studentName']);
   if (validationError) return res.status(400).json({ error: validationError });
+  const ownedTest = await get(`SELECT id FROM performance_tests WHERE id = ? AND tenant_id = ?`, [test_id, currentTenantId(req)]);
+  if (!ownedTest) return res.status(404).json({ error: 'Performance test not found' });
+  if (student_id) {
+    const ownedStudent = await get(`SELECT id FROM students WHERE id = ? AND tenant_id = ?`, [student_id, currentTenantId(req)]);
+    if (!ownedStudent) return res.status(404).json({ error: 'Student not found' });
+  }
   const computedMarks = marksObtained === undefined ? Number(physicsMarks || 0) + Number(chemistryMarks || 0) + Number(biologyMarks || 0) + Number(mathsMarks || 0) : Number(marksObtained || 0);
   const percentage = Number(totalMarks || 0) ? Math.round((computedMarks / Number(totalMarks || 0)) * 10000) / 100 : 0;
   const accuracy = Number(attemptedQuestions || 0) ? Math.round((Number(correctAnswers || 0) / Number(attemptedQuestions || 0)) * 100) : 0;
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO performance_results (test_id, student_id, studentName, rollNumber, courseName, batchName, branch, status, physicsMarks, chemistryMarks, biologyMarks, mathsMarks, marksObtained, totalMarks, percentage, attemptedQuestions, correctAnswers, wrongAnswers, blankQuestions, accuracy, strongSubject, weakSubject, weakChapter, suggestedAction, teacherRemark, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [test_id, student_id || null, studentName, rollNumber, courseName, batchName, branch, status, Number(physicsMarks || 0), Number(chemistryMarks || 0), Number(biologyMarks || 0), Number(mathsMarks || 0), computedMarks, Number(totalMarks || 0), percentage, Number(attemptedQuestions || 0), Number(correctAnswers || 0), Number(wrongAnswers || 0), Number(blankQuestions || 0), accuracy, strongSubject, weakSubject, weakChapter, suggestedAction, teacherRemark, now, now]
+    `INSERT INTO performance_results (tenant_id, test_id, student_id, studentName, rollNumber, courseName, batchName, branch, status, physicsMarks, chemistryMarks, biologyMarks, mathsMarks, marksObtained, totalMarks, percentage, attemptedQuestions, correctAnswers, wrongAnswers, blankQuestions, accuracy, strongSubject, weakSubject, weakChapter, suggestedAction, teacherRemark, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), test_id, student_id || null, studentName, rollNumber, courseName, batchName, branch, status, Number(physicsMarks || 0), Number(chemistryMarks || 0), Number(biologyMarks || 0), Number(mathsMarks || 0), computedMarks, Number(totalMarks || 0), percentage, Number(attemptedQuestions || 0), Number(correctAnswers || 0), Number(wrongAnswers || 0), Number(blankQuestions || 0), accuracy, strongSubject, weakSubject, weakChapter, suggestedAction, teacherRemark, now, now]
   );
-  await recalculatePerformanceRanks(test_id);
+  await recalculatePerformanceRanks(test_id, currentTenantId(req));
   if (status === 'Absent' || percentage < 40 || accuracy < 50) {
     await run(
-      `INSERT INTO remedial_students (test_id, student_id, studentName, batchName, weakSubject, weakChapter, issue, assignedTeacher, remedialDate, status, followUpTest, createdAt, updatedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [test_id, student_id || null, studentName, batchName, weakSubject, weakChapter, status === 'Absent' ? 'Test absent' : percentage < 40 ? 'Score below 40%' : 'Low accuracy', '', '', 'Pending', 'Required', now, now]
+      `INSERT INTO remedial_students (tenant_id, test_id, student_id, studentName, batchName, weakSubject, weakChapter, issue, assignedTeacher, remedialDate, status, followUpTest, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [currentTenantId(req), test_id, student_id || null, studentName, batchName, weakSubject, weakChapter, status === 'Absent' ? 'Test absent' : percentage < 40 ? 'Score below 40%' : 'Low accuracy', '', '', 'Pending', 'Required', now, now]
     );
   }
-  const row = await get(`SELECT * FROM performance_results WHERE id = ?`, [result.lastID]);
+  const row = await get(`SELECT * FROM performance_results WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]);
   res.json(normalizePerformance(row, ['parentReportSent'], ['marksObtained', 'totalMarks', 'percentage', 'accuracy']));
 });
 
 router.delete('/api/test-performance/results/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  const row = await get(`SELECT * FROM performance_results WHERE id = ?`, [req.params.id]);
-  await run(`DELETE FROM performance_results WHERE id = ?`, [req.params.id]);
-  if (row?.test_id) await recalculatePerformanceRanks(row.test_id);
+  const row = await get(`SELECT * FROM performance_results WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!row) return res.status(404).json({ error: 'Performance result not found' });
+  await run(`DELETE FROM performance_results WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (row.test_id) await recalculatePerformanceRanks(row.test_id, currentTenantId(req));
   res.json({ ok: true });
 });
 
 router.get('/api/test-performance/question-analysis', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM question_analysis ORDER BY test_id DESC, questionNumber ASC, id ASC`);
+  const rows = await all(`SELECT * FROM question_analysis WHERE tenant_id = ? ORDER BY test_id DESC, questionNumber ASC, id ASC`, [currentTenantId(req)]);
   res.json(rows.map((row) => normalizePerformance(row, [], ['questionNumber', 'marksAwarded'])));
 });
 
@@ -4080,21 +4325,25 @@ router.post('/api/test-performance/question-analysis', authMiddleware, requireTe
   const { test_id, student_id, questionNumber, subject, chapter, topic, correctOption, selectedOption, resultStatus = 'Correct', marksAwarded = 0 } = req.body;
   const validationError = requireFields(req.body, ['test_id', 'questionNumber', 'chapter']);
   if (validationError) return res.status(400).json({ error: validationError });
+  const ownedTest = await get(`SELECT id FROM performance_tests WHERE id = ? AND tenant_id = ?`, [test_id, currentTenantId(req)]);
+  if (!ownedTest) return res.status(404).json({ error: 'Performance test not found' });
   const result = await run(
-    `INSERT INTO question_analysis (test_id, student_id, questionNumber, subject, chapter, topic, correctOption, selectedOption, resultStatus, marksAwarded, createdAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [test_id, student_id || null, Number(questionNumber || 0), subject, chapter, topic, correctOption, selectedOption, resultStatus, Number(marksAwarded || 0), new Date().toISOString()]
+    `INSERT INTO question_analysis (tenant_id, test_id, student_id, questionNumber, subject, chapter, topic, correctOption, selectedOption, resultStatus, marksAwarded, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), test_id, student_id || null, Number(questionNumber || 0), subject, chapter, topic, correctOption, selectedOption, resultStatus, Number(marksAwarded || 0), new Date().toISOString()]
   );
   res.json(normalizePerformance(await get(`SELECT * FROM question_analysis WHERE id = ?`, [result.lastID]), [], ['questionNumber', 'marksAwarded']));
 });
 
 router.delete('/api/test-performance/question-analysis/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM question_analysis WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM question_analysis WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Question analysis not found' });
+  await run(`DELETE FROM question_analysis WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.get('/api/test-performance/parent-reports', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM parent_report_logs ORDER BY sentAt DESC, id DESC`);
+  const rows = await all(`SELECT * FROM parent_report_logs WHERE tenant_id = ? ORDER BY sentAt DESC, id DESC`, [currentTenantId(req)]);
   res.json(rows.map((row) => normalizePerformance(row, [], ['marksObtained', 'totalMarks', 'batchRank', 'attendancePercent', 'homeworkCompletion'])));
 });
 
@@ -4102,21 +4351,29 @@ router.post('/api/test-performance/parent-reports', authMiddleware, requireTenan
   const { test_id, student_id, studentName, parentPhone, marksObtained = 0, totalMarks = 0, batchRank, strongSubject, weakSubject, attendancePercent = 0, homeworkCompletion = 0, teacherRemark, requiredAction, sentVia = 'WhatsApp', status = 'Draft' } = req.body;
   const validationError = requireFields(req.body, ['test_id', 'studentName']);
   if (validationError) return res.status(400).json({ error: validationError });
+  const ownedTest = await get(`SELECT id FROM performance_tests WHERE id = ? AND tenant_id = ?`, [test_id, currentTenantId(req)]);
+  if (!ownedTest) return res.status(404).json({ error: 'Performance test not found' });
+  if (student_id) {
+    const ownedStudent = await get(`SELECT id FROM students WHERE id = ? AND tenant_id = ?`, [student_id, currentTenantId(req)]);
+    if (!ownedStudent) return res.status(404).json({ error: 'Student not found' });
+  }
   const result = await run(
-    `INSERT INTO parent_report_logs (test_id, student_id, studentName, parentPhone, marksObtained, totalMarks, batchRank, strongSubject, weakSubject, attendancePercent, homeworkCompletion, teacherRemark, requiredAction, sentVia, sentAt, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [test_id, student_id || null, studentName, parentPhone, Number(marksObtained || 0), Number(totalMarks || 0), batchRank || null, strongSubject, weakSubject, Number(attendancePercent || 0), Number(homeworkCompletion || 0), teacherRemark, requiredAction, sentVia, new Date().toISOString(), status]
+    `INSERT INTO parent_report_logs (tenant_id, test_id, student_id, studentName, parentPhone, marksObtained, totalMarks, batchRank, strongSubject, weakSubject, attendancePercent, homeworkCompletion, teacherRemark, requiredAction, sentVia, sentAt, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), test_id, student_id || null, studentName, parentPhone, Number(marksObtained || 0), Number(totalMarks || 0), batchRank || null, strongSubject, weakSubject, Number(attendancePercent || 0), Number(homeworkCompletion || 0), teacherRemark, requiredAction, sentVia, new Date().toISOString(), status]
   );
-  res.json(await get(`SELECT * FROM parent_report_logs WHERE id = ?`, [result.lastID]));
+  res.json(await get(`SELECT * FROM parent_report_logs WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]));
 });
 
 router.delete('/api/test-performance/parent-reports/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM parent_report_logs WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM parent_report_logs WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Parent report not found' });
+  await run(`DELETE FROM parent_report_logs WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.get('/api/test-performance/teacher-impact', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM teacher_result_impact ORDER BY updatedAt DESC, id DESC`);
+  const rows = await all(`SELECT * FROM teacher_result_impact WHERE tenant_id = ? ORDER BY updatedAt DESC, id DESC`, [currentTenantId(req)]);
   res.json(rows.map((row) => normalizePerformance(row, [], ['previousAverage', 'currentAverage', 'improvementPercent', 'weakChapterCount', 'homeworkCompletion', 'doubtResolution'])));
 });
 
@@ -4124,45 +4381,65 @@ router.post('/api/test-performance/teacher-impact', authMiddleware, requireTenan
   const { test_id, teacher_id, teacherName, subject, batchName, previousAverage = 0, currentAverage = 0, weakChapterCount = 0, homeworkCompletion = 0, doubtResolution = 0, remarks } = req.body;
   const validationError = requireFields(req.body, ['teacherName', 'subject', 'batchName']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (test_id) {
+    const ownedTest = await get(`SELECT id FROM performance_tests WHERE id = ? AND tenant_id = ?`, [test_id, currentTenantId(req)]);
+    if (!ownedTest) return res.status(404).json({ error: 'Performance test not found' });
+  }
+  if (teacher_id) {
+    const ownedTeacher = await get(`SELECT id FROM teachers WHERE id = ? AND tenant_id = ?`, [teacher_id, currentTenantId(req)]);
+    if (!ownedTeacher) return res.status(404).json({ error: 'Teacher not found' });
+  }
   const improvementPercent = Math.round((Number(currentAverage || 0) - Number(previousAverage || 0)) * 100) / 100;
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO teacher_result_impact (test_id, teacher_id, teacherName, subject, batchName, previousAverage, currentAverage, improvementPercent, weakChapterCount, homeworkCompletion, doubtResolution, remarks, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [test_id || null, teacher_id || null, teacherName, subject, batchName, Number(previousAverage || 0), Number(currentAverage || 0), improvementPercent, Number(weakChapterCount || 0), Number(homeworkCompletion || 0), Number(doubtResolution || 0), remarks, now, now]
+    `INSERT INTO teacher_result_impact (tenant_id, test_id, teacher_id, teacherName, subject, batchName, previousAverage, currentAverage, improvementPercent, weakChapterCount, homeworkCompletion, doubtResolution, remarks, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), test_id || null, teacher_id || null, teacherName, subject, batchName, Number(previousAverage || 0), Number(currentAverage || 0), improvementPercent, Number(weakChapterCount || 0), Number(homeworkCompletion || 0), Number(doubtResolution || 0), remarks, now, now]
   );
   res.json(normalizePerformance(await get(`SELECT * FROM teacher_result_impact WHERE id = ?`, [result.lastID]), [], ['improvementPercent']));
 });
 
 router.delete('/api/test-performance/teacher-impact/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM teacher_result_impact WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM teacher_result_impact WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Teacher impact not found' });
+  await run(`DELETE FROM teacher_result_impact WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.get('/api/test-performance/remedial-students', authMiddleware, requireTenant, async (req, res) => {
-  res.json(await all(`SELECT * FROM remedial_students ORDER BY remedialDate ASC, id DESC`));
+  res.json(await all(`SELECT * FROM remedial_students WHERE tenant_id = ? ORDER BY remedialDate ASC, id DESC`, [currentTenantId(req)]));
 });
 
 router.post('/api/test-performance/remedial-students', authMiddleware, requireTenant, async (req, res) => {
   const { test_id, student_id, studentName, batchName, weakSubject, weakChapter, issue, assignedTeacher, remedialDate, status = 'Pending', followUpTest = 'Required' } = req.body;
   const validationError = requireFields(req.body, ['studentName', 'issue']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (test_id) {
+    const ownedTest = await get(`SELECT id FROM performance_tests WHERE id = ? AND tenant_id = ?`, [test_id, currentTenantId(req)]);
+    if (!ownedTest) return res.status(404).json({ error: 'Performance test not found' });
+  }
+  if (student_id) {
+    const ownedStudent = await get(`SELECT id FROM students WHERE id = ? AND tenant_id = ?`, [student_id, currentTenantId(req)]);
+    if (!ownedStudent) return res.status(404).json({ error: 'Student not found' });
+  }
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO remedial_students (test_id, student_id, studentName, batchName, weakSubject, weakChapter, issue, assignedTeacher, remedialDate, status, followUpTest, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [test_id || null, student_id || null, studentName, batchName, weakSubject, weakChapter, issue, assignedTeacher, remedialDate, status, followUpTest, now, now]
+    `INSERT INTO remedial_students (tenant_id, test_id, student_id, studentName, batchName, weakSubject, weakChapter, issue, assignedTeacher, remedialDate, status, followUpTest, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), test_id || null, student_id || null, studentName, batchName, weakSubject, weakChapter, issue, assignedTeacher, remedialDate, status, followUpTest, now, now]
   );
-  res.json(await get(`SELECT * FROM remedial_students WHERE id = ?`, [result.lastID]));
+  res.json(await get(`SELECT * FROM remedial_students WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]));
 });
 
 router.delete('/api/test-performance/remedial-students/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM remedial_students WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM remedial_students WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'Remedial student not found' });
+  await run(`DELETE FROM remedial_students WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.get('/api/test-performance/omr-uploads', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM omr_uploads ORDER BY uploadedAt DESC, id DESC`);
+  const rows = await all(`SELECT * FROM omr_uploads WHERE tenant_id = ? ORDER BY uploadedAt DESC, id DESC`, [currentTenantId(req)]);
   res.json(rows.map((row) => normalizePerformance(row, [], ['processedCount', 'errorCount'])));
 });
 
@@ -4170,16 +4447,20 @@ router.post('/api/test-performance/omr-uploads', authMiddleware, requireTenant, 
   const { test_id, omrFileName, uploadedBy, processedCount = 0, errorCount = 0, status = 'Uploaded', notes } = req.body;
   const validationError = requireFields(req.body, ['test_id', 'omrFileName']);
   if (validationError) return res.status(400).json({ error: validationError });
+  const ownedTest = await get(`SELECT id FROM performance_tests WHERE id = ? AND tenant_id = ?`, [test_id, currentTenantId(req)]);
+  if (!ownedTest) return res.status(404).json({ error: 'Performance test not found' });
   const result = await run(
-    `INSERT INTO omr_uploads (test_id, omrFileName, uploadedBy, uploadedAt, processedCount, errorCount, status, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [test_id, omrFileName, uploadedBy || req.user.username, new Date().toISOString(), Number(processedCount || 0), Number(errorCount || 0), status, notes]
+    `INSERT INTO omr_uploads (tenant_id, test_id, omrFileName, uploadedBy, uploadedAt, processedCount, errorCount, status, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), test_id, omrFileName, uploadedBy || req.user.username, new Date().toISOString(), Number(processedCount || 0), Number(errorCount || 0), status, notes]
   );
   res.json(normalizePerformance(await get(`SELECT * FROM omr_uploads WHERE id = ?`, [result.lastID]), [], ['processedCount', 'errorCount']));
 });
 
 router.delete('/api/test-performance/omr-uploads/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM omr_uploads WHERE id = ?`, [req.params.id]);
+  const existing = await get(`SELECT id FROM omr_uploads WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  if (!existing) return res.status(404).json({ error: 'OMR upload not found' });
+  await run(`DELETE FROM omr_uploads WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
