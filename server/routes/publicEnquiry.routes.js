@@ -51,7 +51,7 @@ router.post('/public/enquiries', async (req, res) => {
       source = 'WEBSITE',
       campaign = null,
       website,
-     } = req.body;
+    } = req.body;
 
     if (website) return res.status(200).json({ message: 'Enquiry submitted' });
     if (!tenantSlug || !studentName || !parentPhone || !className || !branchId) {
@@ -63,7 +63,7 @@ router.post('/public/enquiries', async (req, res) => {
       !hasValidText(tenantSlug, 80) ||
       !hasValidText(studentName, 160) ||
       !hasValidText(parentPhone, 32) ||
-      !/^[6-9]\\d{9}$/.test(normalizeIndianPhone(parentPhone)) ||
+      !/^[6-9]\d{9}$/.test(normalizeIndianPhone(parentPhone)) ||
       !hasValidText(className, 80) ||
       !/^[0-9]+$/.test(String(branchId)) ||
       (parentName && !hasValidText(parentName, 160))
