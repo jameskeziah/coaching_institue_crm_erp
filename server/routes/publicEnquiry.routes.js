@@ -53,7 +53,7 @@ router.post('/public/enquiries', async (req, res) => {
       website,
     } = req.body;
 
-    if (website) return res.status(200).json({ message: 'Enquiry submitted' });
+    if (website) return res.status(202).json({ message: 'Enquiry received. Our team will review it.' });
     if (!tenantSlug || !studentName || !parentPhone || !className || !branchId) {
       return res.status(400).json({ message: 'Student name, parent phone, class, branch, and tenant are required', error: 'Student name, parent phone, class, branch, and tenant are required' });
     }
@@ -66,7 +66,10 @@ router.post('/public/enquiries', async (req, res) => {
       !/^[6-9]\d{9}$/.test(normalizeIndianPhone(parentPhone)) ||
       !hasValidText(className, 80) ||
       !/^[a-zA-Z0-9_-]{1,80}$/.test(String(branchId)) ||
-      (parentName && !hasValidText(parentName, 160))
+      (parentName && !hasValidText(parentName, 160)) ||
+      typeof source !== 'string' || source.length > 40 ||
+      (campaign !== null && (typeof campaign !== 'string' || campaign.length > 120)) ||
+      (typeof targetExam !== 'string' || targetExam.length > 80)
     ) {
       return res.status(400).json({ message: 'Invalid enquiry details' });
     }
@@ -87,6 +90,7 @@ router.post('/public/enquiries', async (req, res) => {
     if (Object.keys(safeDetails).length) {
       safeDetails.origin = 'PUBLIC_WEBSITE';
       safeDetails.contactConsent = req.body.contactConsent === true;
+      if (safeDetails.contactConsent) safeDetails.consentCapturedAt = new Date().toISOString();
     }
 
     const tenant = await findPublicTenant(tenantSlug);
@@ -111,7 +115,7 @@ router.post('/public/enquiries', async (req, res) => {
     }
 
     const normalizedPhone = normalizeIndianPhone(parentPhone);
-    const result = await run(
+    await run(
       `INSERT INTO admissions (
         tenant_id,
         studentName,
@@ -151,10 +155,8 @@ router.post('/public/enquiries', async (req, res) => {
       ]
     );
 
-    return res.status(201).json({
-      message: 'Enquiry submitted successfully',
-      data: { leadId: result.lastID },
-    });
+    // Same status and body as the duplicate path: prevent public lead enumeration.
+    return res.status(202).json({ message: 'Enquiry received. Our team will review it.' });
   } catch (error) {
     return res.status(500).json({ message: 'Failed to submit enquiry', error: 'Failed to submit enquiry' });
   }
