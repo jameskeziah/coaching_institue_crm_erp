@@ -65,9 +65,7 @@ router.post('/public/enquiries', async (req, res) => {
     const branch = await get(
       `SELECT id
        FROM branches
-       WHERE id = ?
-       AND tenant_id = ?
-       AND deleted_at IS NULL`,
+       WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL`,
       [branchId, tenant.id]
     );
     if (!branch) return res.status(400).json({ message: 'Invalid branch selected', error: 'Invalid branch selected' });
@@ -77,31 +75,17 @@ router.post('/public/enquiries', async (req, res) => {
       return res.status(409).json({
         code: 'DUPLICATE_LEAD_WARNING',
         warning: duplicateWarning(duplicateLeads),
-        duplicates: duplicateLeads,
+        duplicateDetected: true,
       });
     }
 
     const normalizedPhone = normalizeIndianPhone(parentPhone);
     const result = await run(
       `INSERT INTO admissions (
-        tenant_id,
-        studentName,
-        parentName,
-        parentPhone,
-        parentPhoneNormalized,
-        parent_phone_normalized,
-        className,
-        courseInterested,
-        targetExam,
-        branchId,
-        source,
-        campaign,
-        status,
-        leadTemperature,
-        estimatedRevenue,
-        created_at,
-        updated_at,
-        deleted_at
+        tenant_id, studentName, parentName, parentPhone, parentPhoneNormalized,
+        parent_phone_normalized, className, courseInterested, targetExam, branchId,
+        source, campaign, status, leadTemperature, estimatedRevenue,
+        created_at, updated_at, deleted_at
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEW', 'WARM', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)`,
       [
