@@ -202,12 +202,13 @@ async function main() {
   // Public website bridge: exercise the real API, tenant/branch validation,
   // persisted consent context and identical anonymous acknowledgements.
   if (!currentTenant.slug || !branchMaster.data?.id) throw new Error('Public enquiry smoke fixture is missing tenant slug or branch');
+  const publicEnquiryPhone = `8${String(suffix).slice(-9)}`;
   const publicEnquiry = {
     tenant: currentTenant.slug,
     branchId: branchMaster.data.id,
     studentName: 'Not provided (website enquiry)',
     parentName: `Public Enquiry Smoke Parent ${suffix}`,
-    parentPhone: smokePhone,
+    parentPhone: publicEnquiryPhone,
     className: 'Class X',
     source: 'WEBSITE',
     campaign: 'SSKEMS_ADMISSIONS',
@@ -224,8 +225,8 @@ async function main() {
     throw new Error('Public enquiry initial submission did not return the safe generic 202 response');
   }
   const matchingPublicLeads = async () => {
-    const result = await request(`/admissions?search=${encodeURIComponent(smokePhone)}`, withAuth(token));
-    return result.data.filter((lead) => lead.parentPhone === smokePhone && lead.source === 'WEBSITE');
+    const result = await request(`/admissions?search=${encodeURIComponent(publicEnquiryPhone)}`, withAuth(token));
+    return result.data.filter((lead) => lead.parentPhone === publicEnquiryPhone && lead.source === 'WEBSITE');
   };
   const receivedPublicLeads = await matchingPublicLeads();
   if (receivedPublicLeads.length !== 1 || String(receivedPublicLeads[0].branchId) !== String(branchMaster.data.id)) {
