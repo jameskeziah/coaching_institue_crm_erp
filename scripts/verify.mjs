@@ -18,6 +18,7 @@ const stages = [
   'test:mail',
   'test:authz',
   'test:imports',
+  'test:public-enquiry',
   'test:smoke',
   'test:ui',
 ];

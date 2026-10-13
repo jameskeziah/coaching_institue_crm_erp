@@ -199,6 +199,61 @@ async function main() {
       isActive: true,
     }),
   }));
+  // Public website bridge: exercise the real API, tenant/branch validation,
+  // persisted consent context and identical anonymous acknowledgements.
+  if (!currentTenant.slug || !branchMaster.data?.id) throw new Error('Public enquiry smoke fixture is missing tenant slug or branch');
+  const publicEnquiryPhone = `8${String(suffix).slice(-9)}`;
+  const publicEnquiry = {
+    tenant: currentTenant.slug,
+    branchId: branchMaster.data.id,
+    studentName: 'Not provided (website enquiry)',
+    parentName: `Public Enquiry Smoke Parent ${suffix}`,
+    parentPhone: publicEnquiryPhone,
+    className: 'Class X',
+    source: 'WEBSITE',
+    campaign: 'SSKEMS_ADMISSIONS',
+    academicYear: '2026-27',
+    enquiryTopic: 'Admissions',
+    preferredContactMethod: 'phone',
+    contactConsent: true,
+  };
+  const publicSubmission = await requestRaw('/public/enquiries', {
+    method: 'POST', body: JSON.stringify(publicEnquiry),
+  });
+  if (publicSubmission.response.status !== 202 ||
+      JSON.stringify(publicSubmission.body) !== JSON.stringify({ message: 'Enquiry received. Our team will review it.' })) {
+    throw new Error('Public enquiry initial submission did not return the safe generic 202 response');
+  }
+  const matchingPublicLeads = async () => {
+    const result = await request(`/admissions?search=${encodeURIComponent(publicEnquiryPhone)}`, withAuth(token));
+    return result.data.filter((lead) => lead.parentPhone === publicEnquiryPhone && lead.source === 'WEBSITE');
+  };
+  const receivedPublicLeads = await matchingPublicLeads();
+  if (receivedPublicLeads.length !== 1 || String(receivedPublicLeads[0].branchId) !== String(branchMaster.data.id)) {
+    throw new Error('Website enquiry was not persisted once against the correct CRM branch');
+  }
+  const enquiryContext = typeof receivedPublicLeads[0].customFields === 'string'
+    ? JSON.parse(receivedPublicLeads[0].customFields) : receivedPublicLeads[0].customFields;
+  if (enquiryContext?.academicYear !== '2026-27' ||
+      enquiryContext?.origin !== 'PUBLIC_WEBSITE' ||
+      enquiryContext?.contactConsent !== true || !enquiryContext?.consentCapturedAt) {
+    throw new Error('Website enquiry did not persist consent and allowlisted academic context');
+  }
+  const publicDuplicate = await requestRaw('/public/enquiries', {
+    method: 'POST', body: JSON.stringify(publicEnquiry),
+  });
+  if (publicDuplicate.response.status !== 202 ||
+      JSON.stringify(publicDuplicate.body) !== JSON.stringify(publicSubmission.body) ||
+      (await matchingPublicLeads()).length !== 1) {
+    throw new Error('Duplicate public enquiry leaked status/details or created another record');
+  }
+  const invalidPublicBranch = await requestRaw('/public/enquiries', {
+    method: 'POST', body: JSON.stringify({ ...publicEnquiry, branchId: 'not-the-selected-branch' }),
+  });
+  if (invalidPublicBranch.response.status !== 400 || (await matchingPublicLeads()).length !== 1) {
+    throw new Error('Public enquiry accepted an invalid branch or changed lead data');
+  }
+
   const courseMaster = await request('/courses', withAuth(token, {
     method: 'POST',
     body: JSON.stringify({
