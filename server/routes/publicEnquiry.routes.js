@@ -65,7 +65,7 @@ router.post('/public/enquiries', async (req, res) => {
       !hasValidText(parentPhone, 32) ||
       !/^[6-9]\d{9}$/.test(normalizeIndianPhone(parentPhone)) ||
       !hasValidText(className, 80) ||
-      !/^[0-9]+$/.test(String(branchId)) ||
+      !/^[a-zA-Z0-9_-]{1,80}$/.test(String(branchId)) ||
       (parentName && !hasValidText(parentName, 160))
     ) {
       return res.status(400).json({ message: 'Invalid enquiry details' });
