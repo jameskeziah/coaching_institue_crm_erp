@@ -91,7 +91,7 @@ router.post('/integrations/school/enquiry', async (req, res) => {
       origin: 'SSKEMS school website',
     };
     await run(
-      \`INSERT INTO admissions (
+      `INSERT INTO admissions (
         tenant_id, studentName, parentName, parentPhone,
         parentPhoneNormalized, parent_phone_normalized, className,
         courseInterested, targetExam, branchId, source, subSource,
@@ -100,7 +100,7 @@ router.post('/integrations/school/enquiry', async (req, res) => {
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?, 'School admissions', NULL, ?, 'WEBSITE', 'SSKEMS',
         'NEW', 'WARM', 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL
-      )\`,
+      )`,
       [
         tenant.id, data.studentName, data.parentName, phone, phone, phone,
         data.className, branch.id, JSON.stringify(metadata),
