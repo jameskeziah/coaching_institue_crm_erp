@@ -1,7 +1,7 @@
 const express = require('express');
 const { run, all, get } = require('../db');
 const { normalizeIndianPhone } = require('../utils/phone');
-const { findDuplicateLeads, duplicateWarning } = require('../services/duplicateLead.service');
+const { findDuplicateLeads } = require('../services/duplicateLead.service');
 
 const router = express.Router();
 
@@ -76,8 +76,7 @@ router.post('/public/enquiries', async (req, res) => {
     if (duplicateLeads.length > 0 && !ignoreDuplicateWarning) {
       return res.status(409).json({
         code: 'DUPLICATE_LEAD_WARNING',
-        warning: duplicateWarning(duplicateLeads),
-        duplicates: duplicateLeads,
+        warning: 'An enquiry already exists for this number. If this is a different enquiry, you may choose to continue.',
       });
     }
 

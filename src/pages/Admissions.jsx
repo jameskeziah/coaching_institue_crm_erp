@@ -589,7 +589,21 @@ export default function Admissions() {
           <div className="grid gap-6 xl:grid-cols-[0.72fr_1.28fr]">
             {selectedLead ? (
               <>
-                <AddLeadActivityForm leadId={selectedLead.id} onCreate={handleCreateActivity} />
+                <div className="space-y-4">
+                  {selectedLead.subSource === 'SSKEMS' ? (
+                    <section className="rounded-xl border border-slate-200 bg-white p-5">
+                      <h3 className="font-semibold">SSKEMS website enquiry</h3>
+                      <dl className="mt-3 grid gap-2 text-sm">
+                        <div><dt className="font-medium">Academic year</dt><dd>{selectedLead.data?.academicYear || '-'}</dd></div>
+                        <div><dt className="font-medium">Topic</dt><dd>{selectedLead.data?.enquiryTopic || '-'}</dd></div>
+                        <div><dt className="font-medium">Contact preference</dt><dd>{selectedLead.data?.preferredContactMethod || '-'}</dd></div>
+                        <div><dt className="font-medium">Email</dt><dd>{selectedLead.data?.email || '-'}</dd></div>
+                        <div><dt className="font-medium">Question</dt><dd className="whitespace-pre-wrap break-words">{selectedLead.data?.question || 'No question provided.'}</dd></div>
+                      </dl>
+                    </section>
+                  ) : null}
+                  <AddLeadActivityForm leadId={selectedLead.id} onCreate={handleCreateActivity} />
+                </div>
                 {loadingActivities ? (
                   <div className="rounded-md border border-slate-200 bg-white p-6 text-sm text-slate-500">
                     Loading activity timeline...

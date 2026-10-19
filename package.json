@@ -18,7 +18,8 @@
     "migrate:fee-structures": "node server/migrations/015-fee-structure-templates.js",
     "seed:super-admin": "node server/scripts/create-super-admin.js",
     "test:smoke": "node scripts/smoke-test.mjs",
-    "test:ui": "playwright test"
+    "test:ui": "playwright test",
+    "test:school-integration": "node --test server/tests/school-integration.test.cjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.16",
