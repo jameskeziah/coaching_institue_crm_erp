@@ -425,6 +425,7 @@ export default function Students() {
       description="Central student database with profile, parent, admission, document, fee, and history records."
       actions={(
         <>
+          {canDelete ? <Button asChild variant="outline"><Link to="/students/import">Import CSV</Link></Button> : null}
           <Button variant="outline" onClick={exportStudentsCsv}>Export CSV</Button>
           <Button onClick={addStudent}>Add Student</Button>
         </>

@@ -4,6 +4,8 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { CRMLayout } from '@/components/crm-layout';
 import { AuthProvider, useAuth } from './AuthContext';
 import Admissions from './pages/Admissions';
+import AcceptInvitePage from './pages/AcceptInvitePage';
+import VerifyEmailPage from './pages/VerifyEmailPage';
 import Academic from './pages/Academic';
 import AiLab from './pages/AiLab';
 import Attendance from './pages/Attendance';
@@ -22,6 +24,7 @@ import ParentCommunicationCenter from './pages/ParentCommunicationCenter';
 import Reports from './pages/Reports';
 import Students from './pages/Students';
 import StudentProfilePage from './pages/StudentProfile';
+import StudentImport from './pages/StudentImport';
 import TeacherPerformance from './pages/TeacherPerformance';
 import TeacherScoreDashboard from './pages/TeacherScoreDashboard';
 import TeacherScoreDetail from './pages/TeacherScoreDetail';
@@ -52,6 +55,9 @@ function AppRoutes() {
     <Routes>
       <Route index element={<LandingPage />} />
       <Route path="/enquiry" element={<EnquiryPage />} />
+      <Route path="/accept-invite" element={<AcceptInvitePage />} />
+      <Route path="/accept-owner-recovery" element={<AcceptInvitePage />} />
+      <Route path="/verify-email" element={<VerifyEmailPage />} />
       <Route path="/super-admin" element={<SuperAdminLayout />}>
         <Route index element={<OverviewPage />} />
         <Route path="institutes" element={<InstitutesPage />} />
@@ -68,6 +74,7 @@ function AppRoutes() {
         <Route path="/dashboard" element={<ModuleRoute moduleName="dashboard"><Dashboard /></ModuleRoute>} />
         <Route path="/teachers" element={<ModuleRoute moduleName="teachers"><Teachers /></ModuleRoute>} />
         <Route path="/students" element={<ModuleRoute moduleName="students"><Students /></ModuleRoute>} />
+        <Route path="/students/import" element={<ModuleRoute moduleName="students"><StudentImport /></ModuleRoute>} />
         <Route path="/students/:id" element={<ModuleRoute moduleName="students"><StudentProfilePage /></ModuleRoute>} />
         <Route path="/admissions" element={<ModuleRoute moduleName="admissions"><Admissions /></ModuleRoute>} />
         <Route path="/attendance" element={<ModuleRoute moduleName="attendance"><Attendance /></ModuleRoute>} />
