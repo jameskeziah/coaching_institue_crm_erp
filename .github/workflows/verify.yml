@@ -16,7 +16,9 @@ concurrency:
 jobs:
   verify:
     name: Build, security, data safety, and end-to-end tests
-    runs-on: ubuntu-latest
+    # Pin a Playwright-supported runner; ubuntu-latest resolved to Ubuntu 26.04
+    # where Chromium installation failed before npm run verify could execute.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
