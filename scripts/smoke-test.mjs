@@ -1599,15 +1599,16 @@ async function main() {
   const performanceDashboard = await request('/test-performance/dashboard', withAuth(token));
   if (!performanceDashboard.totals || Number(performanceDashboard.totals.testsScheduled) < 1) throw new Error('Test performance dashboard failed');
 
-  const parentPortal = await request('/parent-portal/lookup', {
+  const parentPortal = await requestRaw('/parent-portal/lookup', {
     method: 'POST',
     body: JSON.stringify({
       student_id: student.id,
       parentPhone: smokePhone,
     }),
   });
-  if (!parentPortal.student || !parentPortal.attendance?.length || !parentPortal.fees?.length || !Array.isArray(parentPortal.communication)) {
-    throw new Error('Parent portal lookup failed');
+  if (parentPortal.response.status !== 403 || parentPortal.body.code !== 'PARENT_PORTAL_UNAVAILABLE'
+      || Object.keys(parentPortal.body).sort().join(',') !== 'code,message') {
+    throw new Error('Legacy parent lookup must stay closed without disclosing student data');
   }
 
   await Promise.all([
