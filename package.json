@@ -25,6 +25,7 @@
     "test:mail": "node --test server/tests/mail.service.integration.test.js server/tests/email-outbox.lifecycle.test.js",
     "test:authz": "node --test server/tests/student-followups.authorization.test.js",
     "test:imports": "node --test server/tests/imports.transaction.test.js",
+    "test:postgres:migrations": "node --test server/tests/postgres-migrations.test.js",
     "check:env": "node scripts/check-environment-contract.mjs",
     "check:legacy": "node scripts/check-legacy-freeze.mjs",
     "check:tenant": "node scripts/check-tenant-enforcement.mjs",

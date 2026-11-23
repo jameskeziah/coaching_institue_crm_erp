@@ -20,6 +20,22 @@ jobs:
     # where Chromium installation failed before npm run verify could execute.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: institute_migration_test
+          POSTGRES_PASSWORD: disposable-ci-migration-password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U institute_migration_test -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      POSTGRES_TEST_ADMIN_URL: postgresql://institute_migration_test:disposable-ci-migration-password@127.0.0.1:5432/postgres
 
     steps:
       - name: Check out repository
@@ -52,11 +68,11 @@ jobs:
           const proof = JSON.parse(fs.readFileSync(directory + '/latest-verification-proof.json', 'utf8'));
           const requiredStages = [
             'build', 'check:env', 'check:legacy', 'check:tenant', 'check:security',
-            'test:data-safety', 'test:mail', 'test:authz', 'test:imports', 'test:smoke', 'test:ui',
+            'test:data-safety', 'test:postgres:migrations', 'test:mail', 'test:authz', 'test:imports', 'test:smoke', 'test:ui',
           ];
           if (proof.status !== 'PASSED' || !Array.isArray(proof.stages)
               || !requiredStages.every((stage) => proof.stages.includes(stage))) {
-            throw new Error('Verification proof must pass all 11 required stages');
+            throw new Error('Verification proof must pass all 12 required stages');
           }
           const evidence = {
             ...proof,
