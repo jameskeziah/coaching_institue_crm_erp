@@ -6,6 +6,9 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+if (!process.env.POSTGRES_TEST_ADMIN_URL) {
+  throw new Error('Verification requires POSTGRES_TEST_ADMIN_URL pointing to postgres on a disposable loopback PostgreSQL cluster. See docs/development/a03-postgres-migrations.md.');
+}
 const verificationDatabasePath = path.join(workspaceRoot, 'storage', 'verification', `verify-${process.pid}.sqlite`);
 const apiBase = 'http://localhost:4000/api';
 const stages = [
@@ -15,6 +18,7 @@ const stages = [
   'check:tenant',
   'check:security',
   'test:data-safety',
+  'test:postgres:migrations',
   'test:mail',
   'test:authz',
   'test:imports',

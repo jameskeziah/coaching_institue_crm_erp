@@ -1,5 +1,6 @@
 const path = require('path');
 const bcrypt = require('bcryptjs');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const { env } = require('./config/env');
 const { normalizeStatus, normalizeTemperature, safeJsonParse } = require('./services/admission.service');
 const { normalizeIndianPhone } = require('./utils/phone');
@@ -10,6 +11,12 @@ const isPostgres = /^postgres(ql)?:\/\//i.test(DATABASE_URL);
 
 let sqliteDb = null;
 let pgPool = null;
+const migrationContext = new AsyncLocalStorage();
+let migrationPromise = null;
+
+function postgresQuery(sql, params) {
+  return (migrationContext.getStore()?.client || pgPool).query(sql, params);
+}
 
 if (isPostgres) {
   const { Pool } = require('pg');
@@ -567,7 +574,7 @@ function getSqlite(sql, params = []) {
 
 async function run(sql, params = []) {
   if (!isPostgres) return runSqlite(sql, params);
-  const result = await pgPool.query(toPostgresSql(withReturningId(sql)), params);
+  const result = await postgresQuery(toPostgresSql(withReturningId(sql)), params);
   return {
     changes: result.rowCount,
     lastID: result.rows?.[0]?.id,
@@ -577,13 +584,13 @@ async function run(sql, params = []) {
 
 async function all(sql, params = []) {
   if (!isPostgres) return allSqlite(sql, params);
-  const result = await pgPool.query(toPostgresSql(sql), params);
+  const result = await postgresQuery(toPostgresSql(sql), params);
   return result.rows.map(normalizePostgresRow);
 }
 
 async function get(sql, params = []) {
   if (!isPostgres) return getSqlite(sql, params);
-  const result = await pgPool.query(toPostgresSql(sql), params);
+  const result = await postgresQuery(toPostgresSql(sql), params);
   return normalizePostgresRow(result.rows[0]);
 }
 
@@ -904,6 +911,20 @@ async function createTables() {
       lastGeneratedMonth TEXT,
       createdAt TEXT,
       updatedAt TEXT,
+      FOREIGN KEY(tenant_id) REFERENCES tenants(id)
+    )`
+  );
+
+  // PostgreSQL requires the referenced table before its foreign keys exist.
+  await run(
+    `CREATE TABLE IF NOT EXISTS students (
+      id ${idColumn},
+      tenant_id ${integerType},
+      name TEXT,
+      grade TEXT,
+      batch TEXT,
+      attendance TEXT,
+      data TEXT,
       FOREIGN KEY(tenant_id) REFERENCES tenants(id)
     )`
   );
@@ -1513,19 +1534,6 @@ async function createTables() {
   );
 
   await run(
-    `CREATE TABLE IF NOT EXISTS students (
-      id ${idColumn},
-      tenant_id ${integerType},
-      name TEXT,
-      grade TEXT,
-      batch TEXT,
-      attendance TEXT,
-      data TEXT,
-      FOREIGN KEY(tenant_id) REFERENCES tenants(id)
-    )`
-  );
-
-  await run(
     `CREATE TABLE IF NOT EXISTS data_import_batches (
       id TEXT PRIMARY KEY,
       tenant_id ${integerType} NOT NULL,
@@ -1969,6 +1977,11 @@ async function createTables() {
 }
 
 async function addColumnIfMissing(table, column, definition) {
+  if (isPostgres) {
+    // Catching a duplicate-column error does not recover an aborted PG transaction.
+    await run(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${column} ${definition}`);
+    return;
+  }
   try {
     await run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   } catch (err) {
@@ -4242,7 +4255,11 @@ async function seedAdmin() {
   const admin = await get(`SELECT * FROM users WHERE username = ?`, [adminUsername]);
   if (!admin) {
     const hashed = await bcrypt.hash(adminPassword, 10);
-    await run(`INSERT INTO users (username, password, role, tenant_id) VALUES (?, ?, ?, ?)`, [adminUsername, hashed, 'admin', tenant?.id || null]);
+    await run(
+      `INSERT INTO users (username, password, password_hash, name, email, role, tenant_id, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'admin', ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [adminUsername, hashed, hashed, adminUsername, adminUsername, tenant?.id || null]
+    );
   } else if (!admin.tenant_id && tenant?.id) {
     await run(`UPDATE users SET tenant_id = ? WHERE id = ?`, [tenant.id, admin.id]);
   }
@@ -4303,10 +4320,12 @@ async function seedOntology() {
 async function ensureMessageTemplate(templateKey, displayName, body, variables, now) {
   const existing = await get(`SELECT * FROM message_templates WHERE templateKey = ?`, [templateKey]);
   if (existing) return;
+  const tenant = await ensureDefaultTenant();
   await run(
-    `INSERT INTO message_templates (templateKey, displayName, channel, body, variables, status, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [templateKey, displayName, 'WhatsApp', body, JSON.stringify(variables || []), 'Active', now, now]
+    `INSERT INTO message_templates (templateKey, displayName, channel, body, variables, status, createdAt, updatedAt, tenant_id, createdBy)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [templateKey, displayName, 'WhatsApp', body, JSON.stringify(variables || []), 'Active', now, now,
+      tenant.id, process.env.SYSTEM_USER_ID || 'system']
   );
 }
 
@@ -4349,8 +4368,10 @@ async function seedMessageTemplates() {
   );
 }
 
-async function migrate() {
+async function migrateSchema() {
   await createTables();
+  // Seed before onboarding backfills metadata, retaining older-schema CLI support.
+  await ensureDefaultTenant();
   await migrateFeeColumns();
   await migrateExpenseColumns();
   await migrateAttendanceColumns();
@@ -4360,6 +4381,11 @@ async function migrate() {
   await migrateLeadActivities();
   await migrateAuthColumns();
   await migrateTenantOnboarding();
+  await migrateSuperAdmin();
+  // Establish owners before per-institution defaults and legacy academic backfills.
+  await migrateTenantColumns();
+  await migrateOperationalTenantColumns();
+  await seedAdmin();
   await migrateAcademicMasterData();
   await migrateStudentProfiles();
   await migrateAttendanceOperations();
@@ -4368,14 +4394,49 @@ async function migrate() {
   await migrateTeacherScore();
   await migrateFeeStructureTemplates();
   await migrateFeeFlowHardening();
-  await migrateSuperAdmin();
-  await migrateTenantColumns();
-  await migrateOperationalTenantColumns();
   await migrateBusinessTenantMetadataColumns();
   await migrateTenantIndexes();
-  await seedAdmin();
   await seedOntology();
   await seedMessageTemplates();
+}
+
+async function migrateAtomically() {
+  if (!isPostgres) {
+    await runSqlite('BEGIN IMMEDIATE');
+    try {
+      await migrateSchema();
+      await runSqlite('COMMIT');
+    } catch (error) {
+      await runSqlite('ROLLBACK').catch(() => {});
+      throw error;
+    }
+    return;
+  }
+
+  const client = await pgPool.connect();
+  try {
+    await client.query('BEGIN');
+    // Serialize independent API processes before either inspects or changes schema.
+    // PostgreSQL releases the lock automatically on commit, rollback or disconnect.
+    await client.query('SELECT pg_advisory_xact_lock($1, $2)', [731091, 3]);
+    await migrationContext.run({ client }, migrateSchema);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function migrate() {
+  if (migrationPromise) return migrationPromise;
+  migrationPromise = migrateAtomically();
+  try {
+    return await migrationPromise;
+  } finally {
+    migrationPromise = null;
+  }
 }
 
 async function close() {

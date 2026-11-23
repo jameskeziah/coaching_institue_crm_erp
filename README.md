@@ -98,6 +98,8 @@ Production startup also requires the email, WhatsApp, Razorpay, webhook-verifica
 
 ## Tests
 
+The complete verification gate requires an explicit disposable loopback PostgreSQL cluster as well as its isolated SQLite fixtures. Set `POSTGRES_TEST_ADMIN_URL` to that cluster's `postgres` maintenance database before running `npm run verify`. The harness creates and cleans only its own random test databases and refuses missing configuration. See [A03 PostgreSQL migration verification](docs/development/a03-postgres-migrations.md) for setup, coverage, and limits.
+
 Smoke tests read `API_URL`, `ADMIN_USERNAME`, and `ADMIN_PASSWORD` from `.env`. When `API_URL` targets localhost and the API is not already healthy, the smoke runner starts and later stops it automatically:
 
 ```powershell
