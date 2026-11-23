@@ -16,7 +16,9 @@ concurrency:
 jobs:
   verify:
     name: Build, security, data safety, and end-to-end tests
-    runs-on: ubuntu-latest
+    # Pin a Playwright-supported runner; ubuntu-latest resolved to Ubuntu 26.04
+    # where Chromium installation failed before npm run verify could execute.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
@@ -39,3 +41,46 @@ jobs:
 
       - name: Run the integration verification gate
         run: npm run verify
+
+      - name: Record verified revision and stages
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const directory = 'storage/readiness';
+          const proof = JSON.parse(fs.readFileSync(directory + '/latest-verification-proof.json', 'utf8'));
+          const requiredStages = [
+            'build', 'check:env', 'check:legacy', 'check:tenant', 'check:security',
+            'test:data-safety', 'test:mail', 'test:authz', 'test:imports', 'test:smoke', 'test:ui',
+          ];
+          if (proof.status !== 'PASSED' || !Array.isArray(proof.stages)
+              || !requiredStages.every((stage) => proof.stages.includes(stage))) {
+            throw new Error('Verification proof must pass all 11 required stages');
+          }
+          const evidence = {
+            ...proof,
+            testedCommit: process.env.GITHUB_SHA,
+            pullRequestHead: process.env.PR_HEAD_SHA,
+            runUrl: process.env.GITHUB_SERVER_URL + '/' + process.env.GITHUB_REPOSITORY + '/actions/runs/' + process.env.GITHUB_RUN_ID,
+            runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            runnerOs: process.env.RUNNER_OS,
+          };
+          fs.writeFileSync(directory + '/ci-verification-evidence.json', JSON.stringify(evidence, null, 2) + '\n');
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
+            '## Verification evidence',
+            'Tested commit: ' + evidence.testedCommit,
+            'PR head: ' + evidence.pullRequestHead,
+            '',
+            ...proof.stages.map((stage) => '- ' + stage + ': passed'),
+            '',
+          ].join('\n'));
+          NODE
+
+      - name: Retain verification evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: storage/readiness/ci-verification-evidence.json
+          retention-days: 14
+          if-no-files-found: error
