@@ -3287,51 +3287,13 @@ router.get('/api/automation/batch-discipline', authMiddleware, requireTenant, as
   }));
 });
 
-router.post('/api/parent-portal/lookup', async (req, res) => {
-  const { student_id, parentPhone } = req.body;
-  const validationError = requireFields(req.body, ['student_id', 'parentPhone']);
-  if (validationError) return res.status(400).json({ error: validationError });
-  const student = await get(`SELECT * FROM students WHERE id = ?`, [student_id]);
-  if (!student) return res.status(404).json({ error: 'Student not found' });
-  if (!parentPhoneMatches(student, parentPhone)) return res.status(403).json({ error: 'Parent phone does not match this student' });
-  const attendanceRows = await all(
-    `SELECT attendance_records.status, attendance_records.remarks, attendance_sessions.date, attendance_sessions.batch, attendance_sessions.subject, attendance_sessions.teacherName
-     FROM attendance_records
-     INNER JOIN attendance_sessions ON attendance_sessions.id = attendance_records.session_id
-     WHERE attendance_records.student_id = ?
-     ORDER BY attendance_sessions.date DESC, attendance_sessions.startTime DESC
-     LIMIT 30`,
-    [student_id]
-  );
-  const feeRows = await all(
-    `SELECT
-      fee_plans.*,
-      students.name AS studentName,
-      COALESCE(SUM(fee_payments.amount), 0) AS paidAmount
-     FROM fee_plans
-     INNER JOIN students ON students.id = fee_plans.student_id
-     LEFT JOIN fee_payments ON fee_payments.fee_plan_id = fee_plans.id AND COALESCE(fee_payments.status, 'Active') != 'Cancelled'
-     WHERE fee_plans.student_id = ?
-     GROUP BY fee_plans.id, students.name
-     ORDER BY fee_plans.updatedAt DESC`,
-    [student_id]
-  );
-  const feePlans = await attachFeeDetailsMany(feeRows);
-  const payments = await all(
-    `SELECT receiptNumber, amount, paymentDate, paymentMethod
-     FROM fee_payments
-     WHERE student_id = ? AND COALESCE(status, 'Active') != 'Cancelled'
-     ORDER BY paymentDate DESC, id DESC
-     LIMIT 20`,
-    [student_id]
-  );
-  const communication = await buildStudentCommunicationTimeline(student_id, { limit: 25 });
-  res.json({
-    student: { id: student.id, name: student.name, grade: student.grade, batch: student.batch },
-    attendance: attendanceRows,
-    fees: feePlans.map((plan) => ({ course: plan.courseProgram || plan.feeCategory, netAmount: plan.netAmount, paidAmount: plan.paidAmount, dueAmount: plan.dueAmount, feeStatus: plan.feeStatus, nextDueDate: plan.nextDueDate })),
-    payments: payments.map((payment) => ({ ...payment, amount: Number(payment.amount || 0) })),
-    communication: communication.timeline,
+// Security hold: student IDs and phone numbers are not parent authentication.
+// Keep this legacy endpoint closed until authenticated, tenant-bound guardian
+// identities and record-level parent authorization are implemented and tested.
+router.post('/api/parent-portal/lookup', (req, res) => {
+  return res.status(403).json({
+    code: 'PARENT_PORTAL_UNAVAILABLE',
+    message: 'Secure parent sign-in is not yet available.',
   });
 });
 
