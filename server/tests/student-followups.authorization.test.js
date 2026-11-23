@@ -905,6 +905,27 @@ test('AI Lab dashboard, records, references, and mutations remain tenant-scoped'
   assert.equal((await get(`SELECT projectName FROM ai_lab_projects WHERE id = ? AND tenant_id = ?`, [context.foreignAiProjectId, context.secondTenantId])).projectName, 'Private Foreign AI Project');
 });
 
+test('legacy parent lookup never discloses student, fee, or attendance data', async () => {
+  const cases = [
+    { studentId: context.studentId, user: null },
+    { studentId: context.secondTenantStudentId, user: null },
+    { studentId: context.secondTenantStudentId, user: context.users.owner },
+    { studentId: context.studentId, user: context.secondTenantOwner },
+  ];
+  for (const { studentId, user } of cases) {
+    const response = await fetch(`${context.server.baseUrl}/api/parent-portal/lookup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(user ? authHeader(user) : {}) },
+      body: JSON.stringify({ student_id: studentId, parentPhone: '9888888888' }),
+    });
+    assert.equal(response.status, 403);
+    const body = await response.json();
+    assert.equal(body.code, 'PARENT_PORTAL_UNAVAILABLE');
+    assert.deepEqual(Object.keys(body).sort(), ['code', 'message']);
+    assert.doesNotMatch(JSON.stringify(body), /Private Other Student|Student One|FOREIGN-RECEIPT|LOCAL-RECEIPT/);
+  }
+});
+
 test.after(async () => {
   await context?.server?.close();
   await close();
