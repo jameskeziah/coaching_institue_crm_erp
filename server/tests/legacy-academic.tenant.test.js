@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { Client } = require('pg');
+const { dropOwnedFixtureDatabase } = require('./postgres-fixture');
 const express = require('express');
 
 if (!process.env.POSTGRES_TEST_ADMIN_URL) {
@@ -113,7 +114,7 @@ test.after(async () => {
       try {
         if (databaseCreated) {
           assert.match(databaseName, /^institute_academic_test_[a-f0-9]{16}$/);
-          await administrator.query(`DROP DATABASE "${databaseName}" WITH (FORCE)`);
+          await dropOwnedFixtureDatabase(administrator, databaseName);
         }
       } finally { await administrator.end(); }
     }

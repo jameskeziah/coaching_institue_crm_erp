@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const express = require('express');
 const { Client } = require('pg');
+const { dropOwnedFixtureDatabase } = require('./postgres-fixture');
 const { generateReceiptPdf } = require('../services/receiptPdf.service');
 
 if (!process.env.POSTGRES_TEST_ADMIN_URL) {
@@ -113,7 +114,7 @@ test.after(async () => {
         try {
           if (databaseCreated) {
             assert.match(databaseName, /^institute_receipt_test_[a-f0-9]{16}$/);
-            await administrator.query(`DROP DATABASE "${databaseName}" WITH (FORCE)`);
+            await dropOwnedFixtureDatabase(administrator, databaseName);
           }
         } finally { await administrator.end(); }
       }
