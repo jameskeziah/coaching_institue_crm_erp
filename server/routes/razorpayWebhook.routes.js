@@ -112,7 +112,7 @@ async function processPaymentStatus(payload, status, tenantId) {
   await run(
     `UPDATE fee_payment_links
      SET status = ?,
-         paid_at = CASE WHEN ? = 'PAID' THEN CURRENT_TIMESTAMP ELSE paid_at END,
+         paid_at = CASE WHEN ? = 'PAID' THEN CAST(CURRENT_TIMESTAMP AS TEXT) ELSE paid_at END,
          updated_at = CURRENT_TIMESTAMP
      WHERE razorpay_payment_link_id = ? AND CAST(tenant_id AS TEXT) = ?`,
     [status, status, paymentLinkId, tenantId]

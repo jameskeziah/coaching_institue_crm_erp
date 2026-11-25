@@ -7,7 +7,15 @@ const path = require('node:path');
 const express = require('express');
 const { Client } = require('pg');
 
-const administratorUrl = process.env.POSTGRES_TEST_ADMIN_URL;
+if (!process.env.POSTGRES_TEST_ADMIN_URL) {
+  throw new Error('POSTGRES_TEST_ADMIN_URL is required; real PostgreSQL payment isolation tests must not be skipped.');
+}
+const administratorUrl = new URL(process.env.POSTGRES_TEST_ADMIN_URL);
+if (!['postgres:', 'postgresql:'].includes(administratorUrl.protocol)
+  || !['127.0.0.1', 'localhost', '[::1]'].includes(administratorUrl.hostname)
+  || administratorUrl.pathname !== '/postgres') {
+  throw new Error('Payment webhook tests require postgres on a disposable loopback PostgreSQL cluster.');
+}
 const databasePrefix = 'institute_payment_test_';
 const secrets = { alpha: 'alpha-disposable-webhook-secret', beta: 'beta-disposable-webhook-secret', global: 'global-disposable-webhook-secret' };
 let directory, administrator, databaseName, db, server, baseUrl, fixture, originalPdf, pdfService;
@@ -24,7 +32,7 @@ async function webhook(payload, secret, eventId = crypto.randomUUID()) {
   const response = await fetch(baseUrl, { method: 'POST', headers: {
     'Content-Type': 'application/json', 'x-razorpay-event-id': eventId,
     'x-razorpay-signature': crypto.createHmac('sha256', secret).update(body).digest('hex'),
-  }, body });
+  }, body, signal: AbortSignal.timeout(10000) });
   return { status: response.status, body: await response.json() };
 }
 
@@ -38,22 +46,14 @@ async function snapshot() {
 
 test.before(async () => {
   directory = fs.mkdtempSync(path.join(os.tmpdir(), 'institute-payment-security-'));
-  let databaseUrl = path.join(directory, 'fixture.sqlite');
-  if (administratorUrl) {
-    const administratorTarget = new URL(administratorUrl);
-    if (!['postgres:', 'postgresql:'].includes(administratorTarget.protocol)
-      || !['127.0.0.1', 'localhost', '[::1]'].includes(administratorTarget.hostname)
-      || administratorTarget.pathname !== '/postgres') {
-      throw new Error('Payment webhook tests require postgres on a disposable loopback PostgreSQL cluster.');
-    }
-    administrator = new Client({ connectionString: administratorUrl, connectionTimeoutMillis: 10000 });
-    await administrator.connect();
-    const generatedName = `${databasePrefix}${crypto.randomBytes(8).toString('hex')}`;
-    await administrator.query(`CREATE DATABASE "${generatedName}"`);
-    databaseName = generatedName;
-    administratorTarget.pathname = `/${databaseName}`;
-    databaseUrl = administratorTarget.toString();
-  }
+  administrator = new Client({ connectionString: administratorUrl.toString(), connectionTimeoutMillis: 10000 });
+  await administrator.connect();
+  const generatedName = `${databasePrefix}${crypto.randomBytes(8).toString('hex')}`;
+  await administrator.query(`CREATE DATABASE "${generatedName}"`);
+  databaseName = generatedName;
+  const administratorTarget = new URL(administratorUrl);
+  administratorTarget.pathname = `/${databaseName}`;
+  const databaseUrl = administratorTarget.toString();
 
   // Never read a user's operational database or provider settings from .env.
   require('dotenv').config = () => ({ parsed: {} });
@@ -140,18 +140,33 @@ test('registered target selects its credentials and event IDs are independent fo
 });
 
 test('conflicting payment, link and secondary-entity tenant references leave financial records unchanged', async () => {
-  await db.run('INSERT INTO fee_payments (tenant_id, amount, razorpay_payment_id) VALUES (?, 100, ?)', [fixture.beta, 'existing-beta-payment']);
+  for (const name of ['alpha', 'beta']) {
+    await db.run('INSERT INTO fee_payments (tenant_id, amount, razorpay_payment_id) VALUES (?, 100, ?)', [fixture[name], `existing-${name}-payment`]);
+  }
   const before = await snapshot();
-  const conflictingPayment = providerPayload('payment.failed', 'alpha', fixture.alpha);
-  conflictingPayment.payload.payment.entity.id = 'existing-beta-payment';
-  assert.equal((await webhook(conflictingPayment, secrets.alpha)).status, 400);
-  const conflictingLink = providerPayload('payment_link.paid', 'alpha', fixture.beta);
-  conflictingLink.payload.payment_link = { entity: { id: 'provider-link-alpha', notes: { tenantId: String(fixture.alpha) } } };
-  assert.equal((await webhook(conflictingLink, secrets.alpha)).status, 400);
-  const conflictingLinkId = providerPayload('payment.failed', 'alpha', fixture.alpha);
-  conflictingLinkId.payload.payment.entity.notes.paymentLinkId = 'provider-link-beta';
-  assert.equal((await webhook(conflictingLinkId, secrets.alpha)).status, 400);
+  for (const [name, other] of [['alpha', 'beta'], ['beta', 'alpha']]) {
+    const conflictingPayment = providerPayload('payment.failed', name, fixture[name]);
+    conflictingPayment.payload.payment.entity.id = `existing-${other}-payment`;
+    assert.deepEqual(await webhook(conflictingPayment, secrets[name]), { status: 400, body: { error: 'Invalid webhook' } });
+    const conflictingLink = providerPayload('payment_link.paid', name, fixture[other]);
+    conflictingLink.payload.payment_link = { entity: { id: `provider-link-${name}`, notes: { tenantId: String(fixture[name]) } } };
+    assert.equal((await webhook(conflictingLink, secrets[name])).status, 400);
+    const conflictingLinkId = providerPayload('payment.failed', name, fixture[name]);
+    conflictingLinkId.payload.payment.entity.notes.paymentLinkId = `provider-link-${other}`;
+    assert.equal((await webhook(conflictingLinkId, secrets[name])).status, 400);
+  }
   assert.deepEqual(await snapshot(), before);
+});
+
+test('captured status callbacks update only their registered tenant payment link', async () => {
+  for (const [name, other] of [['alpha', 'beta'], ['beta', 'alpha']]) {
+    const otherLink = await db.get('SELECT * FROM fee_payment_links WHERE id = ?', [`local-${other}`]);
+    assert.equal((await webhook(providerPayload('payment.captured', name), secrets[name])).status, 200);
+    const ownLink = await db.get('SELECT * FROM fee_payment_links WHERE id = ?', [`local-${name}`]);
+    assert.equal(ownLink.status, 'PAID');
+    assert.ok(ownLink.paid_at);
+    assert.deepEqual(await db.get('SELECT * FROM fee_payment_links WHERE id = ?', [`local-${other}`]), otherLink);
+  }
 });
 
 test('valid paid callbacks post only the registered institution ledger and remain idempotent', async () => {

@@ -1,5 +1,3 @@
-const fs = require('fs');
-const path = require('path');
 const express = require('express');
 
 const authMiddleware = require('../middleware/auth');
@@ -7,6 +5,7 @@ const { requireTenant } = require('../middleware/tenant');
 const { requireAnyRole } = require('../middleware/rbac');
 const { ROLE_GROUPS } = require('../config/roles');
 const { get, all } = require('../services/db.service');
+const { resolveReceiptPdfPath } = require('../services/receiptPdf.service');
 const {
   createStudentFeePlan,
   loadPlan,
@@ -122,13 +121,11 @@ router.get(
        AND tenant_id = ?`,
       [req.params.id, req.user.tenantId]
     );
-    if (!receipt?.pdf_path && !receipt?.pdfPath) {
-      return res.status(404).json({ error: 'Receipt PDF not found' });
-    }
-    const filePath = path.resolve(receipt.pdf_path || receipt.pdfPath);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'Receipt PDF file is missing' });
-    }
+    const filePath = await resolveReceiptPdfPath({
+      tenantId: req.user.tenantId,
+      filePath: receipt?.pdf_path || receipt?.pdfPath,
+    });
+    if (!filePath) return res.status(404).json({ error: 'Receipt PDF not found' });
     return res.sendFile(filePath);
   }
 );

@@ -24,7 +24,7 @@ The five real PostgreSQL cases cover:
 4. A late seed failure after schema changes and backfills, proving that the entire earlier schema and data are restored, followed by a successful retry.
 5. A failure during initial schema creation, proving that no partial tables, columns, indexes, or constraints remain, followed by a successful retry.
 
-The required GitHub Actions job runs the complete 12-stage verification gate with a PostgreSQL 18 service. Missing PostgreSQL test configuration fails verification; the migration suite is never silently skipped. The revision-linked CI evidence includes `test:postgres:migrations` alongside the existing build, SQLite, authorization, mail, import, API smoke, and browser stages.
+The required GitHub Actions job runs the complete verification gate with a PostgreSQL 18 service. Missing PostgreSQL test configuration fails verification; the migration suite is never silently skipped. The revision-linked CI evidence includes `test:postgres:migrations` alongside the tenant-isolation, build, SQLite, authorization, mail, import, API smoke, and browser stages.
 
 ## Scope and release boundary
 

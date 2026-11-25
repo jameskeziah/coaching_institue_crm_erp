@@ -240,15 +240,10 @@ async function recordFeePayment({
       const existingPayment = await get(
         `SELECT id
          FROM fee_payments
-         WHERE (razorpay_payment_id = ? AND ? IS NOT NULL)
-            OR (razorpay_payment_link_id = ? AND ? IS NOT NULL)
+         WHERE tenant_id = ?
+           AND (razorpay_payment_id = ? OR razorpay_payment_link_id = ?)
          LIMIT 1`,
-        [
-          razorpayPaymentId,
-          razorpayPaymentId,
-          razorpayPaymentLinkId,
-          razorpayPaymentLinkId,
-        ]
+        [tenantId, razorpayPaymentId, razorpayPaymentLinkId]
       );
       if (existingPayment) {
         return {
@@ -356,7 +351,7 @@ async function recordFeePayment({
       receiptFooterNote: settings.receipt_footer_note,
       authorizedSignatureUrl: settings.authorized_signature_url,
     };
-    const pdfPath = await generateReceiptPdf({ receipt });
+    const pdfPath = await generateReceiptPdf({ tenantId, receipt });
     const receiptId = crypto.randomUUID();
 
     const receiptResult = await run(

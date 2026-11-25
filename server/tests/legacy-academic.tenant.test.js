@@ -170,17 +170,49 @@ test('academic lists and every dashboard data source remain private in both dire
   }
 });
 
+test('dashboard groups subject names that collide with Object prototype properties safely', async () => {
+  const owner = owners[0];
+  const subjects = ['__proto__', 'constructor', 'toString'];
+  const createdIds = [];
+  try {
+    for (const subject of subjects) {
+      const created = await request('/api/academic/syllabus', { owner, method: 'POST', body: { ...academicPayload('syllabus', owner), subject } });
+      assert.equal(created.status, 200, JSON.stringify(created.data));
+      createdIds.push(created.data.id);
+    }
+    const dashboard = await request('/api/academic/dashboard', { owner });
+    assert.equal(dashboard.status, 200, JSON.stringify(dashboard.data));
+    assert.equal(dashboard.data.syllabusBySubject.length, subjects.length + 1);
+    for (const subject of subjects) {
+      assert.deepEqual(dashboard.data.syllabusBySubject.find((row) => row.subject === subject), {
+        subject, plannedTopics: 1, completed: 1, pending: 0, completionPercent: 100,
+      });
+    }
+    const otherDashboard = await request('/api/academic/dashboard', { owner: owners[1] });
+    assert.deepEqual(otherDashboard.data.syllabusBySubject.map((row) => row.subject), ['beta private subject']);
+  } finally {
+    for (const id of createdIds) await request(`/api/academic/syllabus/${id}`, { owner, method: 'DELETE' });
+  }
+});
+
 test('foreign syllabus updates and all academic deletions return 404 without modifying either institution', async () => {
   for (const [index, owner] of owners.entries()) {
     const other = owners[1 - index];
     const syllabusBefore = await db.get('SELECT * FROM academic_syllabus WHERE id = ?', [other.records.syllabus]);
-    const update = await request(`/api/academic/syllabus/${other.records.syllabus}`, { owner, method: 'PUT', body: academicPayload('syllabus', owner) });
+    const update = await request(`/api/academic/syllabus/${other.records.syllabus}?tenant_id=${other.tenantId}`, {
+      owner, method: 'PUT', headers: { 'X-Tenant-Id': String(other.tenantId) },
+      body: { ...academicPayload('syllabus', owner), tenant_id: other.tenantId, tenantId: other.tenantId },
+    });
     assert.equal(update.status, 404);
+    assert.deepEqual(update.data, { error: 'Academic record not found' });
     assert.deepEqual(await db.get('SELECT * FROM academic_syllabus WHERE id = ?', [other.records.syllabus]), syllabusBefore);
     for (const [family, table] of families) {
       const before = await db.get(`SELECT * FROM ${table} WHERE id = ?`, [other.records[family]]);
-      const deletion = await request(`/api/academic/${family}/${other.records[family]}`, { owner, method: 'DELETE' });
+      const deletion = await request(`/api/academic/${family}/${other.records[family]}?tenantId=${other.tenantId}`, {
+        owner, method: 'DELETE', headers: { 'X-Tenant-Id': String(other.tenantId) }, body: { tenant_id: other.tenantId },
+      });
       assert.equal(deletion.status, 404, `${family}: ${JSON.stringify(deletion.data)}`);
+      assert.deepEqual(deletion.data, { error: 'Academic record not found' });
       assert.deepEqual(await db.get(`SELECT * FROM ${table} WHERE id = ?`, [other.records[family]]), before, `${family} foreign record changed`);
     }
     assert.ok(await db.get('SELECT id FROM class_delivery_logs WHERE id = ?', [other.records['delivery-logs']]), 'foreign lecture deletion must not cascade into its delivery log');
@@ -194,6 +226,7 @@ test('foreign teachers and lecture references are rejected before inserts or rel
       const beforeCounts = await Promise.all(families.map(async ([, table]) => Number((await db.get(`SELECT COUNT(*) AS count FROM ${table}`)).count)));
       const result = await request(`/api/academic/${family}`, { owner, method: 'POST', body: { ...academicPayload(family, owner), teacher_id: other.teacherId } });
       assert.equal(result.status, 404, `${family} accepted another institution's teacher: ${JSON.stringify(result.data)}`);
+      assert.deepEqual(result.data, { error: 'Referenced academic record not found' });
       assert.deepEqual(await Promise.all(families.map(async ([, table]) => Number((await db.get(`SELECT COUNT(*) AS count FROM ${table}`)).count))), beforeCounts);
     }
     const foreignLectureBefore = await db.get('SELECT * FROM lecture_plans WHERE id = ?', [other.records['lecture-plans']]);
@@ -201,15 +234,48 @@ test('foreign teachers and lecture references are rejected before inserts or rel
       owner, method: 'POST', body: { ...academicPayload('delivery-logs', owner), lecture_plan_id: other.records['lecture-plans'], lectureCompleted: true },
     });
     assert.equal(invalidDelivery.status, 404);
+    assert.deepEqual(invalidDelivery.data, { error: 'Referenced academic record not found' });
     assert.deepEqual(await db.get('SELECT * FROM lecture_plans WHERE id = ?', [other.records['lecture-plans']]), foreignLectureBefore);
   }
 });
 
+test('malformed or missing record references fail closed without SQL errors or writes', async () => {
+  const invalidIds = ['not-an-id', '0', '-1', '1.5', '2147483648', '2147483647'];
+  const snapshot = async () => Promise.all(families.map(async ([, table]) => db.all(`SELECT * FROM ${table} ORDER BY id`)));
+  const before = await snapshot();
+  for (const owner of owners) {
+    for (const id of invalidIds) {
+      for (const [family] of families) {
+        const result = await request(`/api/academic/${family}/${id}`, { owner, method: 'DELETE' });
+        assert.equal(result.status, 404, `${family}/${id}: ${JSON.stringify(result.data)}`);
+        assert.deepEqual(result.data, { error: 'Academic record not found' });
+      }
+      const edit = await request(`/api/academic/syllabus/${id}`, { owner, method: 'PUT', body: academicPayload('syllabus', owner) });
+      assert.equal(edit.status, 404);
+      assert.deepEqual(edit.data, { error: 'Academic record not found' });
+      for (const family of ['timetable', 'lecture-plans', 'delivery-logs', 'homework']) {
+        const result = await request(`/api/academic/${family}`, { owner, method: 'POST', body: { ...academicPayload(family, owner), teacher_id: id } });
+        assert.equal(result.status, 404, `${family} accepted teacher ${id}: ${JSON.stringify(result.data)}`);
+        assert.deepEqual(result.data, { error: 'Referenced academic record not found' });
+      }
+      const delivery = await request('/api/academic/delivery-logs', { owner, method: 'POST', body: { ...academicPayload('delivery-logs', owner), lecture_plan_id: id } });
+      assert.equal(delivery.status, 404);
+      assert.deepEqual(delivery.data, { error: 'Referenced academic record not found' });
+    }
+  }
+  assert.deepEqual(await snapshot(), before, 'invalid references must not insert, edit, delete or complete any academic record');
+});
+
 test('authorized syllabus edits, own deletions and lecture-child cleanup still work independently', async () => {
   for (const [index, owner] of owners.entries()) {
-    const updated = await request(`/api/academic/syllabus/${owner.records.syllabus}`, { owner, method: 'PUT', body: { ...academicPayload('syllabus', owner), topic: `${owner.label} updated topic` } });
+    const other = owners[1 - index];
+    const updated = await request(`/api/academic/syllabus/${owner.records.syllabus}?tenantId=${other.tenantId}`, {
+      owner, method: 'PUT', headers: { 'X-Tenant-Id': String(other.tenantId) },
+      body: { ...academicPayload('syllabus', owner), topic: `${owner.label} updated topic`, tenant_id: other.tenantId },
+    });
     assert.equal(updated.status, 200, JSON.stringify(updated.data));
     assert.equal(updated.data.topic, `${owner.label} updated topic`);
+    assert.equal(ownerTenant(updated.data), String(owner.tenantId));
     const standaloneDelivery = await request('/api/academic/delivery-logs', { owner, method: 'POST', body: { ...academicPayload('delivery-logs', owner), lecture_plan_id: null } });
     assert.equal(standaloneDelivery.status, 200);
     assert.equal((await request(`/api/academic/delivery-logs/${standaloneDelivery.data.id}`, { owner, method: 'DELETE' })).status, 200);
@@ -231,6 +297,11 @@ test('academic endpoints require authentication and the legacy parent lookup rem
   for (const family of [...families.map(([family]) => family), 'dashboard']) {
     assert.equal((await request(`/api/academic/${family}`)).status, 401);
   }
+  for (const [family] of families) {
+    assert.equal((await request(`/api/academic/${family}`, { method: 'POST', body: academicPayload(family, owners[0]) })).status, 401);
+    assert.equal((await request(`/api/academic/${family}/1`, { method: 'DELETE' })).status, 401);
+  }
+  assert.equal((await request('/api/academic/syllabus/1', { method: 'PUT', body: academicPayload('syllabus', owners[0]) })).status, 401);
   for (const owner of [undefined, ...owners]) {
     const response = await request('/api/parent-portal/lookup', { owner, method: 'POST', body: { student_id: owners[1].studentId, parentPhone: '9222222222' } });
     assert.equal(response.status, 403);

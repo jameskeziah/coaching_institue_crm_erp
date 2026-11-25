@@ -68,11 +68,11 @@ jobs:
           const proof = JSON.parse(fs.readFileSync(directory + '/latest-verification-proof.json', 'utf8'));
           const requiredStages = [
             'build', 'check:env', 'check:legacy', 'check:tenant', 'check:security',
-            'test:data-safety', 'test:postgres:migrations', 'test:mail', 'test:authz', 'test:imports', 'test:smoke', 'test:ui',
+            'test:data-safety', 'test:postgres:migrations', 'test:tenant-isolation', 'test:mail', 'test:authz', 'test:imports', 'test:smoke', 'test:ui',
           ];
           if (proof.status !== 'PASSED' || !Array.isArray(proof.stages)
               || !requiredStages.every((stage) => proof.stages.includes(stage))) {
-            throw new Error('Verification proof must pass all 12 required stages');
+            throw new Error('Verification proof must pass all 13 required stages');
           }
           const evidence = {
             ...proof,

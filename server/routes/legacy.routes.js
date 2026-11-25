@@ -3762,7 +3762,7 @@ async function academicDashboard(tenantId) {
     if (['Completed', 'Revised', 'Tested'].includes(row.status)) acc[key].completed += 1;
     if (!['Completed', 'Revised', 'Tested'].includes(row.status)) acc[key].pending += 1;
     return acc;
-  }, {});
+  }, Object.create(null));
   const syllabusBySubject = Object.values(grouped).map((row) => ({
     ...row,
     completionPercent: row.plannedTopics ? Math.round((row.completed / row.plannedTopics) * 100) : 0,
