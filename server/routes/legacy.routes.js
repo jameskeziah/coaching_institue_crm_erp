@@ -3737,16 +3737,16 @@ function normalizeAcademic(row, booleanFields = [], numberFields = []) {
   return normalized;
 }
 
-async function academicDashboard() {
-  const syllabus = await all(`SELECT * FROM academic_syllabus`);
-  const lecturePlans = await all(`SELECT * FROM lecture_plans`);
-  const deliveries = await all(`SELECT * FROM class_delivery_logs`);
-  const homework = await all(`SELECT * FROM homework_assignments`);
-  const tests = await all(`SELECT * FROM test_calendars`);
-  const results = await all(`SELECT * FROM student_test_results`);
-  const doubts = await all(`SELECT * FROM doubt_sessions`);
-  const revisions = await all(`SELECT * FROM revision_plans`);
-  const remedials = await all(`SELECT * FROM remedial_actions`);
+async function academicDashboard(tenantId) {
+  const syllabus = await all(`SELECT * FROM academic_syllabus WHERE tenant_id = ?`, [tenantId]);
+  const lecturePlans = await all(`SELECT * FROM lecture_plans WHERE tenant_id = ?`, [tenantId]);
+  const deliveries = await all(`SELECT * FROM class_delivery_logs WHERE tenant_id = ?`, [tenantId]);
+  const homework = await all(`SELECT * FROM homework_assignments WHERE tenant_id = ?`, [tenantId]);
+  const tests = await all(`SELECT * FROM test_calendars WHERE tenant_id = ?`, [tenantId]);
+  const results = await all(`SELECT * FROM student_test_results WHERE tenant_id = ?`, [tenantId]);
+  const doubts = await all(`SELECT * FROM doubt_sessions WHERE tenant_id = ?`, [tenantId]);
+  const revisions = await all(`SELECT * FROM revision_plans WHERE tenant_id = ?`, [tenantId]);
+  const remedials = await all(`SELECT * FROM remedial_actions WHERE tenant_id = ?`, [tenantId]);
   const plannedTopics = syllabus.length;
   const completedTopics = syllabus.filter((row) => ['Completed', 'Revised', 'Tested'].includes(row.status)).length;
   const deliveredLectures = deliveries.filter((row) => Number(row.lectureCompleted || 0)).length;
@@ -3762,7 +3762,7 @@ async function academicDashboard() {
     if (['Completed', 'Revised', 'Tested'].includes(row.status)) acc[key].completed += 1;
     if (!['Completed', 'Revised', 'Tested'].includes(row.status)) acc[key].pending += 1;
     return acc;
-  }, {});
+  }, Object.create(null));
   const syllabusBySubject = Object.values(grouped).map((row) => ({
     ...row,
     completionPercent: row.plannedTopics ? Math.round((row.completed / row.plannedTopics) * 100) : 0,
@@ -3785,12 +3785,41 @@ async function academicDashboard() {
   };
 }
 
+function validAcademicId(value) {
+  return ['string', 'number'].includes(typeof value)
+    && /^[1-9]\d*$/.test(String(value))
+    && Number(value) <= 2147483647;
+}
+
+async function ownedAcademicRecord(req, res, table) {
+  const row = validAcademicId(req.params.id)
+    ? await get(`SELECT id FROM ${table} WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)])
+    : null;
+  if (!row) res.status(404).json({ error: 'Academic record not found' });
+  return row;
+}
+
+async function rejectForeignAcademicReferences(req, res, { teacherId, lecturePlanId } = {}) {
+  // Table names are internal constants; callers supply only parameterized IDs.
+  for (const [table, id] of [['teachers', teacherId], ['lecture_plans', lecturePlanId]]) {
+    if (id === undefined || id === null || id === '') continue;
+    const row = validAcademicId(id)
+      ? await get(`SELECT id FROM ${table} WHERE id = ? AND tenant_id = ?`, [id, currentTenantId(req)])
+      : null;
+    if (!row) {
+      res.status(404).json({ error: 'Referenced academic record not found' });
+      return true;
+    }
+  }
+  return false;
+}
+
 router.get('/api/academic/dashboard', authMiddleware, requireTenant, async (req, res) => {
-  res.json(await academicDashboard());
+  res.json(await academicDashboard(currentTenantId(req)));
 });
 
 router.get('/api/academic/syllabus', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM academic_syllabus ORDER BY courseName ASC, subject ASC, chapter ASC, topic ASC`);
+  const rows = await all(`SELECT * FROM academic_syllabus WHERE tenant_id = ? ORDER BY courseName ASC, subject ASC, chapter ASC, topic ASC`, [currentTenantId(req)]);
   res.json(rows.map((row) => normalizeAcademic(row, ['requiredTest'], ['estimatedLectures'])));
 });
 
@@ -3800,30 +3829,30 @@ router.post('/api/academic/syllabus', authMiddleware, requireTenant, async (req,
   if (validationError) return res.status(400).json({ error: validationError });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO academic_syllabus (courseName, subject, chapter, topic, subTopic, difficulty, estimatedLectures, requiredTest, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [courseName, subject, chapter, topic, subTopic, difficulty, Number(estimatedLectures || 0), requiredTest ? 1 : 0, status, now, now]
+    `INSERT INTO academic_syllabus (tenant_id, courseName, subject, chapter, topic, subTopic, difficulty, estimatedLectures, requiredTest, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), courseName, subject, chapter, topic, subTopic, difficulty, Number(estimatedLectures || 0), requiredTest ? 1 : 0, status, now, now]
   );
-  res.json(normalizeAcademic(await get(`SELECT * FROM academic_syllabus WHERE id = ?`, [result.lastID]), ['requiredTest'], ['estimatedLectures']));
+  res.json(normalizeAcademic(await get(`SELECT * FROM academic_syllabus WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]), ['requiredTest'], ['estimatedLectures']));
 });
 
 router.put('/api/academic/syllabus/:id', authMiddleware, requireTenant, async (req, res) => {
   const { courseName, subject, chapter, topic, subTopic, difficulty = 'Basic', estimatedLectures = 1, requiredTest = false, status = 'Pending' } = req.body;
-  const existing = await get(`SELECT * FROM academic_syllabus WHERE id = ?`, [req.params.id]);
-  if (!existing) return res.status(404).json({ error: 'Syllabus topic not found' });
+  if (!await ownedAcademicRecord(req, res, 'academic_syllabus')) return;
   await run(
-    `UPDATE academic_syllabus SET courseName = ?, subject = ?, chapter = ?, topic = ?, subTopic = ?, difficulty = ?, estimatedLectures = ?, requiredTest = ?, status = ?, updatedAt = ? WHERE id = ?`,
-    [courseName, subject, chapter, topic, subTopic, difficulty, Number(estimatedLectures || 0), requiredTest ? 1 : 0, status, new Date().toISOString(), req.params.id]
+    `UPDATE academic_syllabus SET courseName = ?, subject = ?, chapter = ?, topic = ?, subTopic = ?, difficulty = ?, estimatedLectures = ?, requiredTest = ?, status = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`,
+    [courseName, subject, chapter, topic, subTopic, difficulty, Number(estimatedLectures || 0), requiredTest ? 1 : 0, status, new Date().toISOString(), req.params.id, currentTenantId(req)]
   );
-  res.json(normalizeAcademic(await get(`SELECT * FROM academic_syllabus WHERE id = ?`, [req.params.id]), ['requiredTest'], ['estimatedLectures']));
+  res.json(normalizeAcademic(await get(`SELECT * FROM academic_syllabus WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]), ['requiredTest'], ['estimatedLectures']));
 });
 
 router.delete('/api/academic/syllabus/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM academic_syllabus WHERE id = ?`, [req.params.id]);
+  if (!await ownedAcademicRecord(req, res, 'academic_syllabus')) return;
+  await run(`DELETE FROM academic_syllabus WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.get('/api/academic/calendar', authMiddleware, requireTenant, async (req, res) => {
-  res.json(await all(`SELECT * FROM academic_calendars ORDER BY startDate ASC, id DESC`));
+  res.json(await all(`SELECT * FROM academic_calendars WHERE tenant_id = ? ORDER BY startDate ASC, id DESC`, [currentTenantId(req)]));
 });
 
 router.post('/api/academic/calendar', authMiddleware, requireTenant, async (req, res) => {
@@ -3832,25 +3861,27 @@ router.post('/api/academic/calendar', authMiddleware, requireTenant, async (req,
   if (validationError) return res.status(400).json({ error: validationError });
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO academic_calendars (academicYear, calendarType, title, courseName, startDate, endDate, targetDate, notes, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [academicYear, calendarType, title, courseName, startDate, endDate, targetDate, notes, status, now, now]
+    `INSERT INTO academic_calendars (tenant_id, academicYear, calendarType, title, courseName, startDate, endDate, targetDate, notes, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), academicYear, calendarType, title, courseName, startDate, endDate, targetDate, notes, status, now, now]
   );
-  res.json(await get(`SELECT * FROM academic_calendars WHERE id = ?`, [result.lastID]));
+  res.json(await get(`SELECT * FROM academic_calendars WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]));
 });
 
 router.delete('/api/academic/calendar/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM academic_calendars WHERE id = ?`, [req.params.id]);
+  if (!await ownedAcademicRecord(req, res, 'academic_calendars')) return;
+  await run(`DELETE FROM academic_calendars WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.get('/api/academic/timetable', authMiddleware, requireTenant, async (req, res) => {
-  res.json(await all(`SELECT * FROM batch_timetables ORDER BY batchName ASC, dayOfWeek ASC, timeSlot ASC`));
+  res.json(await all(`SELECT * FROM batch_timetables WHERE tenant_id = ? ORDER BY batchName ASC, dayOfWeek ASC, timeSlot ASC`, [currentTenantId(req)]));
 });
 
 router.post('/api/academic/timetable', authMiddleware, requireTenant, async (req, res) => {
   const { batchName, courseName, subject, teacher_id, teacherName, dayOfWeek, timeSlot, room, lectureType = 'Regular', status = 'Scheduled' } = req.body;
   const validationError = requireFields(req.body, ['batchName', 'subject', 'dayOfWeek', 'timeSlot']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (await rejectForeignAcademicReferences(req, res, { teacherId: teacher_id })) return;
   const managedBatch = await get(
     `SELECT id, status FROM batches WHERE tenant_id = ? AND name = ? AND deleted_at IS NULL`,
     [currentTenantId(req), batchName]
@@ -3860,25 +3891,27 @@ router.post('/api/academic/timetable', authMiddleware, requireTenant, async (req
   }
   const now = new Date().toISOString();
   const result = await run(
-    `INSERT INTO batch_timetables (batchName, courseName, subject, teacher_id, teacherName, dayOfWeek, timeSlot, room, lectureType, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [batchName, courseName, subject, teacher_id || null, teacherName, dayOfWeek, timeSlot, room, lectureType, status, now, now]
+    `INSERT INTO batch_timetables (tenant_id, batchName, courseName, subject, teacher_id, teacherName, dayOfWeek, timeSlot, room, lectureType, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), batchName, courseName, subject, teacher_id || null, teacherName, dayOfWeek, timeSlot, room, lectureType, status, now, now]
   );
-  res.json(await get(`SELECT * FROM batch_timetables WHERE id = ?`, [result.lastID]));
+  res.json(await get(`SELECT * FROM batch_timetables WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]));
 });
 
 router.delete('/api/academic/timetable/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM batch_timetables WHERE id = ?`, [req.params.id]);
+  if (!await ownedAcademicRecord(req, res, 'batch_timetables')) return;
+  await run(`DELETE FROM batch_timetables WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.get('/api/academic/lecture-plans', authMiddleware, requireTenant, async (req, res) => {
-  res.json(await all(`SELECT * FROM lecture_plans ORDER BY date DESC, batchName ASC, subject ASC`));
+  res.json(await all(`SELECT * FROM lecture_plans WHERE tenant_id = ? ORDER BY date DESC, batchName ASC, subject ASC`, [currentTenantId(req)]));
 });
 
 router.post('/api/academic/lecture-plans', authMiddleware, requireTenant, async (req, res) => {
   const { date, batchName, courseName, subject, chapter, topic, subTopic, teacher_id, teacherName, lectureType = 'Regular', homeworkPlanned, testLinked, teachingMaterial, status = 'Planned' } = req.body;
   const validationError = requireFields(req.body, ['date', 'batchName', 'subject', 'topic']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (await rejectForeignAcademicReferences(req, res, { teacherId: teacher_id })) return;
   const now = new Date().toISOString();
   const result = await run(
     `INSERT INTO lecture_plans
@@ -3890,17 +3923,18 @@ router.post('/api/academic/lecture-plans', authMiddleware, requireTenant, async 
       lectureType, homeworkPlanned, testLinked, teachingMaterial, status, now, now,
       currentTenantId(req), date, topic, req.user.id]
   );
-  res.json(await get(`SELECT * FROM lecture_plans WHERE id = ?`, [result.lastID]));
+  res.json(await get(`SELECT * FROM lecture_plans WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]));
 });
 
 router.delete('/api/academic/lecture-plans/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM class_delivery_logs WHERE lecture_plan_id = ?`, [req.params.id]);
-  await run(`DELETE FROM lecture_plans WHERE id = ?`, [req.params.id]);
+  if (!await ownedAcademicRecord(req, res, 'lecture_plans')) return;
+  await run(`DELETE FROM class_delivery_logs WHERE lecture_plan_id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
+  await run(`DELETE FROM lecture_plans WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.get('/api/academic/delivery-logs', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM class_delivery_logs ORDER BY date DESC, id DESC`);
+  const rows = await all(`SELECT * FROM class_delivery_logs WHERE tenant_id = ? ORDER BY date DESC, id DESC`, [currentTenantId(req)]);
   res.json(rows.map((row) => normalizeAcademic(row, ['lectureCompleted', 'homeworkGiven', 'notesProvided'])));
 });
 
@@ -3908,21 +3942,23 @@ router.post('/api/academic/delivery-logs', authMiddleware, requireTenant, async 
   const { lecture_plan_id, date, batchName, subject, teacher_id, teacherName, plannedTopic, actualTopic, lectureCompleted = true, classAttendance, homeworkGiven = false, doubtsSolved, notesProvided = false, teacherRemark, academicHeadRemark, status = 'Delivered' } = req.body;
   const validationError = requireFields(req.body, ['date', 'batchName', 'subject', 'actualTopic']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (await rejectForeignAcademicReferences(req, res, { teacherId: teacher_id, lecturePlanId: lecture_plan_id })) return;
   const result = await run(
-    `INSERT INTO class_delivery_logs (lecture_plan_id, date, batchName, subject, teacher_id, teacherName, plannedTopic, actualTopic, lectureCompleted, classAttendance, homeworkGiven, doubtsSolved, notesProvided, teacherRemark, academicHeadRemark, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [lecture_plan_id || null, date, batchName, subject, teacher_id || null, teacherName, plannedTopic, actualTopic, lectureCompleted ? 1 : 0, classAttendance, homeworkGiven ? 1 : 0, doubtsSolved, notesProvided ? 1 : 0, teacherRemark, academicHeadRemark, status, new Date().toISOString()]
+    `INSERT INTO class_delivery_logs (tenant_id, lecture_plan_id, date, batchName, subject, teacher_id, teacherName, plannedTopic, actualTopic, lectureCompleted, classAttendance, homeworkGiven, doubtsSolved, notesProvided, teacherRemark, academicHeadRemark, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [currentTenantId(req), lecture_plan_id || null, date, batchName, subject, teacher_id || null, teacherName, plannedTopic, actualTopic, lectureCompleted ? 1 : 0, classAttendance, homeworkGiven ? 1 : 0, doubtsSolved, notesProvided ? 1 : 0, teacherRemark, academicHeadRemark, status, new Date().toISOString()]
   );
-  if (lecture_plan_id && lectureCompleted) await run(`UPDATE lecture_plans SET status = ?, completed_at = ?, updatedAt = ? WHERE id = ?`, ['Delivered', new Date().toISOString(), new Date().toISOString(), lecture_plan_id]);
-  res.json(normalizeAcademic(await get(`SELECT * FROM class_delivery_logs WHERE id = ?`, [result.lastID]), ['lectureCompleted', 'homeworkGiven', 'notesProvided']));
+  if (lecture_plan_id && lectureCompleted) await run(`UPDATE lecture_plans SET status = ?, completed_at = ?, updatedAt = ? WHERE id = ? AND tenant_id = ?`, ['Delivered', new Date().toISOString(), new Date().toISOString(), lecture_plan_id, currentTenantId(req)]);
+  res.json(normalizeAcademic(await get(`SELECT * FROM class_delivery_logs WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]), ['lectureCompleted', 'homeworkGiven', 'notesProvided']));
 });
 
 router.delete('/api/academic/delivery-logs/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM class_delivery_logs WHERE id = ?`, [req.params.id]);
+  if (!await ownedAcademicRecord(req, res, 'class_delivery_logs')) return;
+  await run(`DELETE FROM class_delivery_logs WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 
 router.get('/api/academic/homework', authMiddleware, requireTenant, async (req, res) => {
-  const rows = await all(`SELECT * FROM homework_assignments ORDER BY dueDate DESC, id DESC`);
+  const rows = await all(`SELECT * FROM homework_assignments WHERE tenant_id = ? ORDER BY dueDate DESC, id DESC`, [currentTenantId(req)]);
   res.json(rows.map((row) => normalizeAcademic(row, [], ['submittedCount', 'totalCount', 'pendingStudents'])));
 });
 
@@ -3930,6 +3966,7 @@ router.post('/api/academic/homework', authMiddleware, requireTenant, async (req,
   const { date, batchName, courseName, subject, topic, homework, dueDate, submittedCount = 0, totalCount = 0, checkedBy, teacher_id, pendingStudents, parentAlert = 'Not Sent', status = 'Assigned' } = req.body;
   const validationError = requireFields(req.body, ['date', 'batchName', 'subject', 'homework']);
   if (validationError) return res.status(400).json({ error: validationError });
+  if (await rejectForeignAcademicReferences(req, res, { teacherId: teacher_id })) return;
   const pending = pendingStudents === undefined ? Math.max(0, Number(totalCount || 0) - Number(submittedCount || 0)) : Number(pendingStudents || 0);
   const linkedTeacher = teacher_id
     ? await get(`SELECT id FROM teachers WHERE id = ? AND tenant_id = ?`, [teacher_id, currentTenantId(req)])
@@ -3950,11 +3987,12 @@ router.post('/api/academic/homework', authMiddleware, requireTenant, async (req,
       linkedTeacher?.id || null, date, dueDate, Number(totalCount || 0), Number(submittedCount || 0),
       checkedCount, checkedCount]
   );
-  res.json(normalizeAcademic(await get(`SELECT * FROM homework_assignments WHERE id = ?`, [result.lastID]), [], ['submittedCount', 'totalCount', 'pendingStudents']));
+  res.json(normalizeAcademic(await get(`SELECT * FROM homework_assignments WHERE id = ? AND tenant_id = ?`, [result.lastID, currentTenantId(req)]), [], ['submittedCount', 'totalCount', 'pendingStudents']));
 });
 
 router.delete('/api/academic/homework/:id', authMiddleware, requireTenant, requireAnyRole(ROLE_GROUPS.MANAGEMENT), async (req, res) => {
-  await run(`DELETE FROM homework_assignments WHERE id = ?`, [req.params.id]);
+  if (!await ownedAcademicRecord(req, res, 'homework_assignments')) return;
+  await run(`DELETE FROM homework_assignments WHERE id = ? AND tenant_id = ?`, [req.params.id, currentTenantId(req)]);
   res.json({ ok: true });
 });
 

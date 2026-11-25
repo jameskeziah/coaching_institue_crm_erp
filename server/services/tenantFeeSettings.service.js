@@ -84,7 +84,9 @@ async function ensureTenantFeeSettings(tenantId) {
 }
 
 async function getTenantFeeSettings(tenantId, options = {}) {
-  const row = await ensureTenantFeeSettings(tenantId);
+  const row = options.createIfMissing === false
+    ? await get(`SELECT * FROM tenant_fee_settings WHERE tenant_id = ?`, [tenantId])
+    : await ensureTenantFeeSettings(tenantId);
   return serializeSettings(row, options);
 }
 

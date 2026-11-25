@@ -98,7 +98,7 @@ add('tested_restore', restoreFresh && restoreMatches, restoreProof ? `Restore pr
 
 const verificationProof = readJson(path.join(readinessDirectory, 'latest-verification-proof.json'));
 const verificationFresh = Boolean(verificationProof?.verifiedAt) && ageHours(verificationProof.verifiedAt) <= maxVerificationAgeHours;
-const requiredStages = ['build', 'check:env', 'check:legacy', 'check:tenant', 'check:security', 'test:data-safety', 'test:postgres:migrations', 'test:mail', 'test:authz', 'test:imports', 'test:smoke', 'test:ui'];
+const requiredStages = ['build', 'check:env', 'check:legacy', 'check:tenant', 'check:security', 'test:data-safety', 'test:postgres:migrations', 'test:tenant-isolation', 'test:mail', 'test:authz', 'test:imports', 'test:smoke', 'test:ui'];
 const verificationComplete = verificationProof?.status === 'PASSED' && requiredStages.every((stage) => verificationProof.stages?.includes(stage));
 add('recent_full_verification', verificationFresh && verificationComplete, verificationProof ? `Full verification proof is ${ageHours(verificationProof.verifiedAt).toFixed(1)} hours old.` : 'No full verification proof exists.');
 

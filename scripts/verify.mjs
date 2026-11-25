@@ -19,6 +19,7 @@ const stages = [
   'check:security',
   'test:data-safety',
   'test:postgres:migrations',
+  'test:tenant-isolation',
   'test:mail',
   'test:authz',
   'test:imports',
