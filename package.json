@@ -41,7 +41,12 @@
     "pretest:ui": "playwright install chromium",
     "test:ui": "playwright test",
     "pilot:readiness": "node scripts/pilot-readiness.mjs",
-    "verify": "node scripts/verify.mjs"
+    "verify": "node scripts/verify.mjs",
+    "product:validate": "node scripts/validate-feature-registry.mjs",
+    "product:generate": "node scripts/generate-feature-reports.mjs",
+    "product:check": "npm run product:validate && node scripts/generate-feature-reports.mjs --check",
+    "product:coverage": "node scripts/check-feature-coverage.mjs",
+    "product:test": "node --test scripts/product-governance.test.mjs"
   },
   "engines": {
     "node": "24.x",
@@ -75,9 +80,11 @@
   "devDependencies": {
     "@playwright/test": "^1.60.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "ajv": "8.20.0",
     "autoprefixer": "^10.4.19",
     "concurrently": "^10.0.3",
     "cross-env": "^10.1.0",
+    "fflate": "0.8.3",
     "postcss": "^8.4.35",
     "tailwindcss": "^3.4.4",
     "vite": "^5.4.1"

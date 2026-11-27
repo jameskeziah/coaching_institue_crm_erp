@@ -1,0 +1,59 @@
+
+name: Feature registry snapshot
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    name: Validate and retain feature registry
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      - name: Validate the registry and regenerate reports
+        run: |
+          npm run product:check
+          npm run product:generate
+      - name: Associate the validated registry with the merged revision
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { git, registryPath } from './scripts/product-governance.mjs';
+          const revision = git(['rev-parse', 'HEAD']).trim();
+          if (revision !== process.env.GITHUB_SHA) throw new Error('Unexpected checkout revision');
+          const digest = createHash('sha256').update(readFileSync(registryPath)).digest('hex');
+          const snapshot = {
+            repositoryRevision: revision,
+            registryGitBlob: git(['rev-parse', revision + ':' + registryPath]).trim(),
+            registrySha256: digest,
+            registryValidation: 'PASSED',
+            workflowRun: process.env.GITHUB_SERVER_URL + '/' + process.env.GITHUB_REPOSITORY + '/actions/runs/' + process.env.GITHUB_RUN_ID,
+          };
+          writeFileSync('docs/product/registry-snapshot.json', JSON.stringify(snapshot, null, 2) + '\n');
+          NODE
+      - uses: actions/upload-artifact@v6
+        with:
+          name: feature-registry-${{ github.sha }}
+          path: |
+            docs/product/feature-registry.json
+            docs/product/feature-registry.schema.json
+            docs/product/registry-snapshot.json
+            docs/product/*.md
+            docs/product/*.xlsx
+          retention-days: 90
+          if-no-files-found: error
