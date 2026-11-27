@@ -4,6 +4,8 @@ ProTrack Institute OS is a Vite + React frontend with an Express API and a raw-S
 
 ## Local setup
 
+Before changing a product feature, find its permanent ID, existing implementation and approved acceptance criteria in the [Institute OS feature governance guide](docs/product/README.md).
+
 1. Install dependencies from the repository root:
 
    ```bash
